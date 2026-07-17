@@ -1,0 +1,2145 @@
+from __future__ import annotations
+
+import json
+import os
+import string
+
+import requests
+
+from gazu.exception import (
+    TaskStatusNotFoundException,
+    TaskMustBeADictException,
+)
+
+from . import client as raw
+from .client import KitsuClient
+from .sorting import sort_by_name
+from .helpers import (
+    download_file,
+    normalize_model_parameter,
+    normalize_list_of_models_for_links,
+)
+
+from .cache import cache
+
+default = raw.default_client
+
+
+def _all_tasks_for_entity(
+    entity: str | dict,
+    collection: str,
+    suffix: str = "tasks",
+    relations: bool = False,
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Fetch and sort the tasks listed at ``<collection>/<entity id>/<suffix>``
+    for the given entity. Shared body of all the ``all_*tasks_for_*`` helpers.
+    """
+    entity = normalize_model_parameter(entity)
+    params = {"relations": True} if relations else {}
+    tasks = raw.fetch_all(
+        f"{collection}/{entity['id']}/{suffix}", params, client=client
+    )
+    return sort_by_name(tasks)
+
+
+def _open_comment_files(comments: list[dict]) -> tuple[dict, list]:
+    """
+    Open the attachment/preview files referenced by a batch of comments.
+
+    Returns the multipart ``files`` dict (including the JSON ``comments``
+    part) and the list of opened files -- the caller must close them.
+    """
+    files = {}
+    opened_files = []
+    try:
+        for x, comment in enumerate(comments):
+            for kind in ("attachment_files", "preview_files"):
+                for y, file_path in enumerate(comment.get(kind) or []):
+                    f = open(file_path, "rb")
+                    opened_files.append(f)
+                    files[f"{kind[:-1]}-{x}-{y}"] = f
+    except Exception:
+        for f in opened_files:
+            f.close()
+        raise
+    files["comments"] = (None, json.dumps(comments), "application/json")
+    return files, opened_files
+
+
+@cache
+def all_task_statuses(client: KitsuClient = default) -> list[dict]:
+    """
+    Returns:
+        list: Task statuses stored in database.
+    """
+    task_statuses = raw.fetch_all("task-status", client=client)
+    return sort_by_name(task_statuses)
+
+
+@cache
+def all_task_types(client: KitsuClient = default) -> list[dict]:
+    """
+    Returns:
+        list: Task types stored in database.
+    """
+    task_types = raw.fetch_all("task-types", client=client)
+    return sort_by_name(task_types)
+
+
+@cache
+def all_task_types_for_project(
+    project: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Returns:
+        list: Task types stored in database.
+    """
+    project = normalize_model_parameter(project)
+    task_types = raw.fetch_all(
+        f"projects/{project['id']}/task-types", client=client
+    )
+    return sort_by_name(task_types)
+
+
+@cache
+def all_task_statuses_for_project(
+    project: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Returns:
+        list: Task status stored in database.
+    """
+    project = normalize_model_parameter(project)
+    task_statuses = raw.fetch_all(
+        f"projects/{project['id']}/settings/task-status", client=client
+    )
+    return sort_by_name(task_statuses)
+
+
+@cache
+def all_tasks_for_shot(
+    shot: str | dict, relations: bool = False, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        shot (str / dict): The shot dict or the shot ID.
+
+    Returns:
+        list: Tasks linked to given shot.
+    """
+    return _all_tasks_for_entity(
+        shot, "shots", relations=relations, client=client
+    )
+
+
+@cache
+def all_tasks_for_concept(
+    concept: str | dict, relations: bool = False, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        concept (str / dict): The concept dict or the concept ID.
+
+    Returns:
+        list: Tasks linked to given concept.
+    """
+    return _all_tasks_for_entity(
+        concept, "concepts", relations=relations, client=client
+    )
+
+
+@cache
+def all_tasks_for_edit(
+    edit: str | dict, relations: bool = False, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        edit (str / dict): The edit dict or the edit ID.
+
+    Returns:
+        list: Tasks linked to given edit.
+    """
+    return _all_tasks_for_entity(
+        edit, "edits", relations=relations, client=client
+    )
+
+
+@cache
+def all_tasks_for_sequence(
+    sequence: str | dict,
+    relations: bool = False,
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Args:
+        sequence (str / dict): The sequence dict or the sequence ID.
+
+    Returns:
+        list: Tasks linked to given sequence.
+    """
+    return _all_tasks_for_entity(
+        sequence, "sequences", relations=relations, client=client
+    )
+
+
+@cache
+def all_tasks_for_scene(
+    scene: str | dict, relations: bool = False, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        scene (str / dict): The scene dict or the scene ID.
+
+    Returns:
+        list: Tasks linked to given scene.
+    """
+    return _all_tasks_for_entity(
+        scene, "scenes", relations=relations, client=client
+    )
+
+
+@cache
+def all_tasks_for_asset(
+    asset: str | dict, relations: bool = False, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        asset (str / dict): The asset dict or the asset ID.
+
+    Returns:
+        list: Tasks directly linked to given asset.
+    """
+    return _all_tasks_for_entity(
+        asset, "assets", relations=relations, client=client
+    )
+
+
+@cache
+def all_tasks_for_episode(
+    episode: str | dict, relations: bool = False, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Retrieve all tasks directly linked to given episode.
+    """
+    return _all_tasks_for_entity(
+        episode, "episodes", relations=relations, client=client
+    )
+
+
+@cache
+def all_shot_tasks_for_sequence(
+    sequence: str | dict,
+    relations: bool = False,
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Retrieve all tasks directly linked to all shots of given sequence.
+    """
+    return _all_tasks_for_entity(
+        sequence, "sequences", "shot-tasks", relations, client
+    )
+
+
+@cache
+def all_shot_tasks_for_episode(
+    episode: str | dict, relations: bool = False, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Retrieve all tasks directly linked to all shots of given episode.
+    """
+    return _all_tasks_for_entity(
+        episode, "episodes", "shot-tasks", relations, client
+    )
+
+
+@cache
+def all_assets_tasks_for_episode(
+    episode: str | dict, relations: bool = False, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Retrieve all tasks directly linked to all assets of given episode.
+    """
+    return _all_tasks_for_entity(
+        episode, "episodes", "asset-tasks", relations, client
+    )
+
+
+@cache
+def all_tasks_for_task_status(
+    project: str | dict,
+    task_type: str | dict,
+    task_status: str | dict,
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Args:
+        project (str / dict): The project dict or the project ID.
+        task_type (str / dict): The task type dict or ID.
+        task_status (str / dict): The task status dict or ID.
+
+    Returns:
+        list: Tasks set at given status for given project and task type.
+    """
+    project = normalize_model_parameter(project)
+    task_type = normalize_model_parameter(task_type)
+    task_status = normalize_model_parameter(task_status)
+    return raw.fetch_all(
+        "tasks",
+        {
+            "project_id": project["id"],
+            "task_type_id": task_type["id"],
+            "task_status_id": task_status["id"],
+        },
+        client=client,
+    )
+
+
+@cache
+def all_tasks_for_task_type(
+    project: str | dict,
+    task_type: str | dict,
+    episode: str | dict | None = None,
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Args:
+        project (str / dict): The project dict or the project ID.
+        task_type (str / dict): The task type dict or ID.
+        episode (str / dict): The episode dict or ID.
+
+    Returns:
+        list: Tasks for given project and task type.
+    """
+    project = normalize_model_parameter(project)
+    task_type = normalize_model_parameter(task_type)
+    params = {
+        "project_id": project["id"],
+        "task_type_id": task_type["id"],
+    }
+    if episode is not None:
+        episode = normalize_model_parameter(episode)
+        params["episode_id"] = episode["id"]
+    return raw.fetch_all("tasks", params, client=client)
+
+
+@cache
+def all_task_types_for_shot(
+    shot: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        shot (str / dict): The shot dict or the shot ID.
+
+    Returns:
+        list: Task types of task linked to given shot.
+    """
+    shot = normalize_model_parameter(shot)
+    path = f"shots/{shot['id']}/task-types"
+    task_types = raw.fetch_all(path, client=client)
+    return sort_by_name(task_types)
+
+
+@cache
+def all_task_types_for_concept(
+    concept: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        concept (str / dict): The concept dict or the concept ID.
+
+    Returns:
+        list: Task types of task linked to given concept.
+    """
+    concept = normalize_model_parameter(concept)
+    path = f"concepts/{concept['id']}/task-types"
+    task_types = raw.fetch_all(path, client=client)
+    return sort_by_name(task_types)
+
+
+@cache
+def all_task_types_for_asset(
+    asset: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        asset (str / dict): The asset dict or the asset ID.
+
+    Returns:
+        list: Task types of tasks related to given asset.
+    """
+    asset = normalize_model_parameter(asset)
+    task_types = raw.fetch_all(
+        f"assets/{asset['id']}/task-types", client=client
+    )
+    return sort_by_name(task_types)
+
+
+@cache
+def all_task_types_for_scene(
+    scene: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        scene (str / dict): The scene dict or the scene ID.
+
+    Returns:
+        list: Task types of tasks linked to given scene.
+    """
+    scene = normalize_model_parameter(scene)
+    path = f"scenes/{scene['id']}/task-types"
+    task_types = raw.fetch_all(path, client=client)
+    return sort_by_name(task_types)
+
+
+@cache
+def all_task_types_for_sequence(
+    sequence: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        sequence (str / dict): The sequence dict or the sequence ID.
+
+    Returns:
+        list: Task types of tasks linked directly to given sequence.
+    """
+    sequence = normalize_model_parameter(sequence)
+    path = f"sequences/{sequence['id']}/task-types"
+    task_types = raw.fetch_all(path, client=client)
+    return sort_by_name(task_types)
+
+
+@cache
+def all_task_types_for_episode(
+    episode: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Returns:
+        list: Task types of tasks linked directly to given episode.
+    """
+    episode = normalize_model_parameter(episode)
+    path = f"episodes/{episode['id']}/task-types"
+    task_types = raw.fetch_all(path, client=client)
+    return sort_by_name(task_types)
+
+
+@cache
+def all_tasks_for_entity_and_task_type(
+    entity: str | dict, task_type: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        entity (str / dict): The entity dict or the entity ID.
+        task_type (str / dict): The task type dict or ID.
+
+    Returns:
+        list: Tasks for given entity or task type.
+    """
+    entity = normalize_model_parameter(entity)
+    task_type = normalize_model_parameter(task_type)
+    task_type_id = task_type["id"]
+    entity_id = entity["id"]
+    path = f"entities/{entity_id}/task-types/{task_type_id}/tasks"
+    return raw.fetch_all(path, client=client)
+
+
+@cache
+def all_tasks_for_person(
+    person: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Returns:
+        list: Tasks that are not done for given person (only for open projects).
+    """
+    person = normalize_model_parameter(person)
+    return raw.fetch_all(f"persons/{person['id']}/tasks", client=client)
+
+
+@cache
+def all_done_tasks_for_person(
+    person: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Returns:
+        list: Tasks that are done for given person (only for open projects).
+    """
+    person = normalize_model_parameter(person)
+    return raw.fetch_all(f"persons/{person['id']}/done-tasks", client=client)
+
+
+@cache
+def get_task_by_entity(
+    entity: str | dict,
+    task_type: str | dict,
+    name: str = "main",
+    client: KitsuClient = default,
+) -> dict | None:
+    """
+    Args:
+        entity (str / dict): The entity dict or the entity ID.
+        task_type (str / dict): The task type dict or ID.
+        name (str): Name of the task to look for.
+
+    Returns:
+        Task matching given entity, task type and name.
+    """
+    entity = normalize_model_parameter(entity)
+    task_type = normalize_model_parameter(task_type)
+    return raw.fetch_first(
+        "tasks",
+        {
+            "name": name,
+            "task_type_id": task_type["id"],
+            "entity_id": entity["id"],
+        },
+        client=client,
+    )
+
+
+@cache
+def get_task_type(task_type_id: str, client: KitsuClient = default) -> dict:
+    """
+    Args:
+        task_type_id (str): ID of claimed task type.
+
+    Returns:
+        dict: Task type matching given ID.
+    """
+    return raw.fetch_one("task-types", task_type_id, client=client)
+
+
+@cache
+def get_task_type_by_name(
+    task_type_name: str,
+    for_entity: str | None = None,
+    department: str | dict | None = None,
+    client: KitsuClient = default,
+) -> dict | None:
+    """
+    Args:
+        task_type_name (str): Name of claimed task type.
+        for_entity (str): The entity type for which the task type is created.
+        department (str / dict): The department for which the task type is created.
+
+    Returns:
+        dict: Task type object for given name, or None if none found.
+    """
+    params = {"name": task_type_name}
+    if for_entity is not None:
+        params["for_entity"] = for_entity
+    if department is not None:
+        params["department_id"] = normalize_model_parameter(department)["id"]
+    return raw.fetch_first("task-types", params, client=client)
+
+
+@cache
+def get_task_type_by_short_name(
+    task_type_short_name: str,
+    for_entity: str | None = None,
+    department: str | dict | None = None,
+    client: KitsuClient = default,
+) -> dict | None:
+    """
+    Args:
+        task_type_short_name (str): Short name of claimed task type.
+        for_entity (str): The entity type for which the task type is created.
+        department (str /dict): The department for which the task type is created.
+
+    Returns:
+        dict: Task type object for given name, or None if none found.
+    """
+    params = {"short_name": task_type_short_name}
+    if for_entity is not None:
+        params["for_entity"] = for_entity
+    if department is not None:
+        params["department_id"] = normalize_model_parameter(department)["id"]
+    return raw.fetch_first("task-types", params, client=client)
+
+
+@cache
+def get_default_task_status(client: KitsuClient = default) -> dict | None:
+    """
+    Returns:
+        dict: The unique task status flagged with `is_default`, or None if
+        none is flagged.
+    """
+    return raw.fetch_first(
+        "task-status", params={"is_default": True}, client=client
+    )
+
+
+@cache
+def get_task_status(
+    task_status_id: str, client: KitsuClient = default
+) -> dict:
+    """
+    Args:
+        task_status_id (str): ID of claimed task status.
+
+    Returns:
+        dict: Task status matching given ID.
+    """
+    return raw.fetch_one("task-status", task_status_id, client=client)
+
+
+@cache
+def get_task_status_by_name(
+    name: str, client: KitsuClient = default
+) -> dict | None:
+    """
+    Args:
+        name (str): The name of claimed task status.
+
+    Returns:
+        dict: Task status matching given name.
+    """
+    return raw.fetch_first("task-status", {"name": name}, client=client)
+
+
+@cache
+def get_task_status_by_short_name(
+    task_status_short_name: str, client: KitsuClient = default
+) -> dict | None:
+    """
+    Args:
+        task_status_short_name (str): The short name of claimed task status.
+
+    Returns:
+        dict: Task status matching given short name.
+    """
+    return raw.fetch_first(
+        "task-status", {"short_name": task_status_short_name}, client=client
+    )
+
+
+def remove_task_type(
+    task_type: str | dict,
+    force: bool = False,
+    client: KitsuClient = default,
+) -> str:
+    """
+    Remove given task type from database.
+
+    Args:
+        task_type (str / dict): The task type dict or ID.
+        force (bool): Whether to force deletion regardless of links to
+            tasks. A task type still attached to a project must first be
+            detached with gazu.project.remove_task_type.
+    """
+    task_type = normalize_model_parameter(task_type)
+    params = {}
+    if force:
+        params = {"force": True}
+    return raw.delete(
+        f"data/task-types/{task_type['id']}",
+        params,
+        client=client,
+    )
+
+
+def remove_task_status(
+    task_status: str | dict, client: KitsuClient = default
+) -> str:
+    """
+    Remove given task status from database.
+
+    Args:
+        task_status (str / dict): The task status dict or ID.
+    """
+    task_status = normalize_model_parameter(task_status)
+    return raw.delete(
+        f"data/task-status/{task_status['id']}",
+        {"force": True},
+        client=client,
+    )
+
+
+def update_task_type(task_type: dict, client: KitsuClient = default) -> dict:
+    """
+    Update given task type into the API.
+
+    Args:
+        task_type (dict): The task type dict to update.
+
+    Returns:
+        dict: Updated task type.
+    """
+    return raw.put(
+        f"data/task-types/{task_type['id']}",
+        task_type,
+        client=client,
+    )
+
+
+def update_task_status(
+    task_status: dict, client: KitsuClient = default
+) -> dict:
+    """
+    Update given task status into the API.
+
+    Args:
+        task_status (dict): The task status dict to update.
+
+    Returns:
+        dict: Updated task status.
+    """
+    return raw.put(
+        f"data/task-status/{task_status['id']}",
+        task_status,
+        client=client,
+    )
+
+
+@cache
+def get_task(task_id: str | dict, client: KitsuClient = default) -> dict:
+    """
+    Args:
+        task_id (str): ID of claimed task.
+
+    Returns:
+        dict: Task matching given ID.
+    """
+    task_id = normalize_model_parameter(task_id)
+    return raw.get(f"data/tasks/{task_id['id']}/full", client=client)
+
+
+def new_task(
+    entity: str | dict,
+    task_type: str | dict,
+    name: str = "main",
+    task_status: dict | None = None,
+    assigner: str | dict | None = None,
+    assignees: list[str | dict] | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Create a new task for given entity and task type.
+
+    Args:
+        entity (dict): Entity for which task is created.
+        task_type (dict): Task type of created task.
+        name (str): Name of the task (default is "main").
+        task_status (dict): The task status to set (default status is Todo).
+        assigner (dict): Person who assigns the task.
+        assignees (list): List of people assigned to the task.
+
+    Returns:
+        The created task, or the existing one if a task with the same entity,
+        task type and name already exists (in which case the requested
+        task_status/assignees are not re-applied).
+    """
+    entity = normalize_model_parameter(entity)
+    task_type = normalize_model_parameter(task_type)
+    if task_status is None:
+        task_status = get_default_task_status(client=client)
+
+    data = {
+        "project_id": entity["project_id"],
+        "entity_id": entity["id"],
+        "task_type_id": task_type["id"],
+        "task_status_id": task_status["id"],
+        "assignees": normalize_list_of_models_for_links(
+            assignees if assignees is not None else []
+        ),
+        "name": name,
+    }
+
+    if assigner is not None:
+        data["assigner_id"] = normalize_model_parameter(assigner)["id"]
+
+    task = get_task_by_entity(entity, task_type, name, client=client)
+    if task is None:
+        task = raw.post("data/tasks", data, client=client)
+    return task
+
+
+def remove_task(task: str | dict, client: KitsuClient = default) -> str:
+    """
+    Remove given task from database.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+    """
+    task = normalize_model_parameter(task)
+    return raw.delete(
+        f"data/tasks/{task['id']}", {"force": True}, client=client
+    )
+
+
+def start_task(
+    task: str | dict,
+    started_task_status: str | dict | None = None,
+    person: str | dict | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Create a comment to change task status to started_task_status
+    (by default WIP) and set its real start date to now.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        started_task_status (str / dict): The task status dict or ID.
+        person (str / dict): The person dict or the person ID.
+
+    Returns:
+        dict: Created comment.
+    """
+    if started_task_status is None:
+        started_task_status = get_task_status_by_short_name(
+            "wip", client=client
+        )
+        if started_task_status is None:
+            raise TaskStatusNotFoundException(
+                (
+                    "started_task_status is None : 'wip' task status is "
+                    "non-existent. You have to create it or to set an other "
+                    "task status for started_task_status in the parameters "
+                    "of the function."
+                )
+            )
+
+    return add_comment(task, started_task_status, person=person, client=client)
+
+
+@cache
+def get_time_spent(
+    task: str | dict, date: str | None = None, client: KitsuClient = default
+) -> dict:
+    """
+    Get the time spent by CG artists on a task at a given date if given. A field contains
+    the total time spent.  Durations are given in minutes. Date format is
+    YYYY-MM-DD.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        date (str): The date for which time spent is required.
+
+    Returns:
+        dict: A dict with person ID as key and time spent object as value.
+    """
+    task = normalize_model_parameter(task)
+    path = f"actions/tasks/{task['id']}/time-spents"
+    if date is not None:
+        path += f"/{date}"
+    return raw.get(path, client=client)
+
+
+def set_time_spent(
+    task: str | dict,
+    person: str | dict,
+    date: str,
+    duration: int,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Set the time spent by a CG artist on a given task at a given date.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        person (str / dict): The person who spent the time on given task.
+        date (str): The date ("YYYY-MM-DD") for which time spent must be set.
+        duration (int): The duration (in minutes) of the time spent on given task.
+
+    Returns:
+        dict: Created time spent entry.
+    """
+    task = normalize_model_parameter(task)
+    person = normalize_model_parameter(person)
+    path = (
+        f"actions/tasks/{task['id']}/time-spents/{date}/persons/{person['id']}"
+    )
+    return raw.post(path, {"duration": duration}, client=client)
+
+
+def add_time_spent(
+    task: str | dict,
+    person: str | dict,
+    date: str,
+    duration: int,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Add given duration to the already logged duration for given task and person
+    at a given date.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        person (str / dict): The person who spent the time on given task.
+        date (str): The date ("YYYY-MM-DD") for which time spent must be set.
+        duration (int): The duration (in minutes) of the time spent on given task.
+
+    Returns:
+        dict: Updated time spent entry.
+    """
+    task = normalize_model_parameter(task)
+    person = normalize_model_parameter(person)
+    path = f"actions/tasks/{task['id']}/time-spents/{date}/persons/{person['id']}/add"
+    return raw.post(path, {"duration": duration}, client=client)
+
+
+def add_comment(
+    task: str | dict,
+    task_status: str | dict,
+    comment: str = "",
+    person: str | dict | None = None,
+    checklist: list[dict] | None = None,
+    attachments: list[str] | None = None,
+    created_at: str | None = None,
+    links: list[str] | None = None,
+    for_client: bool = False,
+    client: KitsuClient = default,
+    progress_callback=None,
+) -> dict:
+    """
+    Add comment to given task. Each comment requires a task_status. Since the
+    addition of comment triggers a task status change. Comment text can be
+    empty.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        task_status (str / dict): The task status dict or ID.
+        comment (str): Comment text
+        person (str / dict): Comment author
+        checklist (list): Comment checklist, e.g [{"text": "Item 1", "checked": false}]
+        attachments (list[file_path]): Attachments file paths
+        created_at (str): Comment date
+        links (list): List of URL links to add to the comment
+        for_client (bool): When True, make the comment visible to clients
+            (manager-only).
+
+    Returns:
+        dict: Created comment.
+    """
+    if checklist is None:
+        checklist = []
+    if attachments is None:
+        attachments = []
+    if links is None:
+        links = []
+    task = normalize_model_parameter(task)
+    task_status = normalize_model_parameter(task_status)
+    data = {
+        "task_status_id": task_status["id"],
+        "comment": comment,
+        "checklist": checklist,
+        "links": links,
+        "for_client": for_client,
+    }
+
+    if person is not None:
+        person = normalize_model_parameter(person)
+        data["person_id"] = person["id"]
+
+    if created_at is not None:
+        data["created_at"] = created_at
+
+    if len(attachments) == 0:
+        return raw.post(
+            f"actions/tasks/{task['id']}/comment", data, client=client
+        )
+    else:
+        attachments = list(attachments)
+        attachment = attachments.pop()
+        # Multipart form parts are plain strings. Zou parses "for_client"
+        # with bool(str), so "False" would wrongly become True -- drop the
+        # field when False (the server defaults it to False). List fields
+        # must be JSON-encoded so Zou's json.loads() can decode them.
+        if not for_client:
+            del data["for_client"]
+        data["checklist"] = json.dumps(checklist)
+        data["links"] = json.dumps(links)
+        return raw.upload(
+            f"actions/tasks/{task['id']}/comment",
+            attachment,
+            data=data,
+            extra_files=attachments,
+            client=client,
+            progress_callback=progress_callback,
+        )
+
+
+def add_attachment_files_to_comment(
+    task: str | dict,
+    comment: str | dict,
+    attachments: str | list[str] = None,
+    client: KitsuClient = default,
+    progress_callback=None,
+) -> dict:
+    """
+    Add attachments files to a given comment.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        comment (str / dict): The comment dict or the comment ID.
+        attachments (list / str) : A list of path for attachments or directly the path.
+
+    Returns:
+        dict: Added attachment files.
+    """
+    if attachments is None:
+        attachments = []
+    if isinstance(attachments, str):
+        attachments = [attachments]
+    if len(attachments) == 0:
+        raise ValueError("The attachments list is empty")
+    attachments = list(attachments)
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    attachment = attachments.pop()
+    return raw.upload(
+        f"actions/tasks/{task['id']}/comments/{comment['id']}/add-attachment",
+        attachment,
+        extra_files=attachments,
+        client=client,
+        progress_callback=progress_callback,
+    )
+
+
+def get_comment(comment_id: str, client: KitsuClient = default) -> dict:
+    """
+    Get comment instance
+
+    Args:
+        comment_id (ID): The comment ID.
+
+    Returns:
+        dict: Given comment instance.
+    """
+    return raw.fetch_one("comments", comment_id, client=client)
+
+
+def remove_comment(comment: str | dict, client: KitsuClient = default) -> str:
+    """
+    Remove given comment and related (previews, news, notifications) from
+    database.
+
+    Args:
+        comment (str / dict): The comment dict or the comment ID.
+    """
+    comment = normalize_model_parameter(comment)
+    return raw.delete(f"data/comments/{comment['id']}", client=client)
+
+
+def create_preview(
+    task: str | dict,
+    comment: str | dict,
+    revision: int | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Create a preview into given comment.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        comment (str / dict): The comment or the comment ID.
+        revision (int): Revision number.
+
+    Returns:
+        dict: Created preview file model.
+    """
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    path = f"actions/tasks/{task['id']}/comments/{comment['id']}/add-preview"
+    data = {}
+    if revision is not None:
+        data["revision"] = revision
+    return raw.post(path, data, client=client)
+
+
+def create_extra_preview(
+    task: str | dict,
+    comment: str | dict,
+    preview_file: str | dict,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Create an extra preview file for a comment revision.
+
+    The new preview file shares the same revision as the given preview file.
+    Use upload_preview_file to upload the file content afterwards.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        comment (str / dict): The comment or the comment ID.
+        preview_file (str / dict): The reference preview file dict or ID.
+
+    Returns:
+        dict: Created preview file model.
+    """
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    preview_file = normalize_model_parameter(preview_file)
+    path = (
+        f"actions/tasks/{task['id']}/comments/{comment['id']}"
+        f"/preview-files/{preview_file['id']}"
+    )
+    return raw.post(path, {}, client=client)
+
+
+def upload_preview_file(
+    preview_file: str | dict,
+    file_path: str,
+    normalize_movie: bool = True,
+    client: KitsuClient = default,
+    progress_callback=None,
+) -> dict:
+    """
+    Upload the file content for a given preview file.
+
+    Args:
+        preview_file (str / dict): The preview_file dict or the preview_file ID.
+        file_path (str): Path of the file to upload as preview.
+    """
+    path = f"pictures/preview-files/{normalize_model_parameter(preview_file)['id']}"
+    if not normalize_movie:
+        path += "?normalize=false"
+    return raw.upload(
+        path, file_path, client=client, progress_callback=progress_callback
+    )
+
+
+def add_preview(
+    task: str | dict,
+    comment: str | dict,
+    preview_file_path: str | None = None,
+    preview_file_url: str | None = None,
+    normalize_movie: bool = True,
+    revision: int | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Add a preview to given comment.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        comment (str / dict): The comment or the comment ID.
+        preview_file_path (str): Path of the file to upload as preview.
+        preview_file_url (str): Url to download the preview file if no path is
+        given.
+        normalize_movie (bool): Normalize the movie or not.
+        revision (int): Revision number.
+
+    Returns:
+        dict: Created preview file model.
+    """
+    if preview_file_path is None and preview_file_url is None:
+        raise ValueError(
+            "add_preview requires either preview_file_path or "
+            "preview_file_url."
+        )
+    downloaded = None
+    if preview_file_url is not None:
+        preview_file_path = downloaded = download_file(preview_file_url)
+    try:
+        preview_file = create_preview(
+            task, comment, revision=revision, client=client
+        )
+        return upload_preview_file(
+            preview_file,
+            preview_file_path,
+            normalize_movie=normalize_movie,
+            client=client,
+        )
+    finally:
+        if downloaded is not None and os.path.exists(downloaded):
+            os.remove(downloaded)
+
+
+def add_extra_preview(
+    task: str | dict,
+    comment: str | dict,
+    preview_file: str | dict,
+    preview_file_path: str | None = None,
+    preview_file_url: str | None = None,
+    normalize_movie: bool = True,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Add an extra preview to given comment revision.
+
+    The extra preview shares the same revision as the given reference preview
+    file. The file content is uploaded afterwards.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        comment (str / dict): The comment or the comment ID.
+        preview_file (str / dict): The reference preview file dict or ID
+        (the new preview shares its revision).
+        preview_file_path (str): Path of the file to upload as preview.
+        preview_file_url (str): Url to download the preview file if no path is
+        given.
+        normalize_movie (bool): Normalize the movie or not.
+
+    Returns:
+        dict: Created preview file model.
+    """
+    if preview_file_path is None and preview_file_url is None:
+        raise ValueError(
+            "add_extra_preview requires either preview_file_path or "
+            "preview_file_url."
+        )
+    downloaded = None
+    if preview_file_url is not None:
+        preview_file_path = downloaded = download_file(preview_file_url)
+    try:
+        new_preview_file = create_extra_preview(
+            task, comment, preview_file, client=client
+        )
+        return upload_preview_file(
+            new_preview_file,
+            preview_file_path,
+            normalize_movie=normalize_movie,
+            client=client,
+        )
+    finally:
+        if downloaded is not None and os.path.exists(downloaded):
+            os.remove(downloaded)
+
+
+def publish_preview(
+    task: str | dict,
+    task_status: str | dict,
+    comment: str = "",
+    person: str | dict | None = None,
+    checklist: list[dict] | None = None,
+    attachments: list[str] | None = None,
+    created_at: str | None = None,
+    preview_file_path: str | None = None,
+    preview_file_url: str | None = None,
+    normalize_movie: bool = True,
+    revision: int | None = None,
+    set_thumbnail: bool = False,
+    links: list[str] | None = None,
+    client: KitsuClient = default,
+) -> tuple[dict, dict]:
+    """
+    Publish a comment and include given preview for given task and set given
+    task status.
+
+    Args:
+        task (str / dict): The task dict or the task ID.
+        task_status (str / dict): The task status dict or ID.
+        comment (str): Comment text
+        person (str / dict): Comment author
+        checklist (list): Comment checklist
+        attachments (list[file_path]): Attachments file paths
+        created_at (str): Comment date
+        preview_file_path (str): Path of the file to upload as preview.
+        preview_file_url (str): Url to download the preview file if no path is
+        given.
+        normalize_movie (bool): Set to false to not do operations on it on the
+        server side.
+        revision (int): Revision number.
+        set_thumbnail (bool): Set the preview as thumbnail of the entity.
+        links (list): List of links to add to the comment
+
+    Returns:
+        tuple(dict, dict): Created comment model and created preview file
+        model.
+    """
+    new_comment = add_comment(
+        task,
+        task_status,
+        comment=comment,
+        person=person,
+        checklist=checklist,
+        attachments=attachments,
+        created_at=created_at,
+        links=links,
+        client=client,
+    )
+    preview_file = add_preview(
+        task,
+        new_comment,
+        preview_file_path=preview_file_path,
+        preview_file_url=preview_file_url,
+        normalize_movie=normalize_movie,
+        revision=revision,
+        client=client,
+    )
+    if set_thumbnail:
+        set_main_preview(preview_file, client=client)
+    return new_comment, preview_file
+
+
+def batch_comments(
+    comments: list[dict] | None = None,
+    task: str | dict | None = None,
+    client: KitsuClient = default,
+    progress_callback=None,
+) -> list[dict]:
+    """
+    Publish a list of comments (with attachments and previews) for given task.
+    Each dict comments may contain a list of attachment files path and preview
+    files path in the keys "attachment_files" and "preview_files". If no task is
+    given each comments needs to have a task_id key.
+
+    Args:
+        comments (list): List of comments to publish.
+        task (str / dict): The task dict or the task ID.
+
+    Returns:
+        list: List of created comments.
+    """
+    if comments is None:
+        comments = []
+    if task is not None:
+        task = normalize_model_parameter(task)
+
+    files, opened_files = _open_comment_files(comments)
+    try:
+        return raw.upload(
+            f"actions/tasks/{task['id'] + '/' if task else ''}batch-comment",
+            file_path=None,
+            files=files,
+            client=client,
+            progress_callback=progress_callback,
+        )
+    finally:
+        for f in opened_files:
+            f.close()
+
+
+def create_multiple_comments(
+    project: str | dict,
+    comments: list[dict] = None,
+    client: KitsuClient = default,
+    progress_callback=None,
+) -> list[dict]:
+    """
+    Create multiple comments at once for a specific project.
+    Each comment updates the respective task status.
+    Each dict comments may contain a list of attachment files path and preview
+    files path in the keys "attachment_files" and "preview_files".
+
+    Args:
+        project (str / dict): The project dict or the project ID.
+        comments (list): List of comments to publish. Each comment must have
+            a task_id key.
+
+    Returns:
+        list: List of created comments.
+    """
+    if comments is None:
+        comments = []
+    project = normalize_model_parameter(project)
+
+    files, opened_files = _open_comment_files(comments)
+    try:
+        return raw.upload(
+            f"actions/projects/{project['id']}/tasks/comment-many",
+            file_path=None,
+            files=files,
+            client=client,
+            progress_callback=progress_callback,
+        )
+    finally:
+        for f in opened_files:
+            f.close()
+
+
+def add_tasks_batch_comments(
+    tasks: list[str | dict],
+    comments_data: dict,
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Add the same comment to several tasks in one request.
+
+    Args:
+        tasks (list): List of task dicts or IDs.
+        comments_data (dict): Comment fields applied to every task. Should
+            contain at least ``text``, ``task_status_id`` and ``person_id``.
+
+    Returns:
+        list: List of created comments.
+    """
+    # Zou expects a "comments" array, each entry carrying its own task_id.
+    comments = [
+        {**comments_data, "task_id": normalize_model_parameter(task)["id"]}
+        for task in tasks
+    ]
+    return raw.post(
+        "actions/tasks/batch-comment", {"comments": comments}, client=client
+    )
+
+
+def set_main_preview(
+    preview_file: str | dict,
+    frame_number: int | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Set given preview as thumbnail of given entity.
+
+    Args:
+        preview_file (str / dict): The preview file dict or ID.
+        frame_number (int): Frame of preview video to set as main preview
+
+    Returns:
+        dict: Created preview file model.
+    """
+    data = {}
+    if frame_number is not None:
+        data["frame_number"] = frame_number
+    preview_file = normalize_model_parameter(preview_file)
+    path = f"actions/preview-files/{preview_file['id']}/set-main-preview"
+    return raw.put(path, data, client=client)
+
+
+@cache
+def all_comments_for_task(
+    task: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        task (str / dict): The task dict or the task ID.
+
+    Returns:
+        Comments linked to the given task.
+    """
+    task = normalize_model_parameter(task)
+    return raw.fetch_all(f"tasks/{task['id']}/comments", client=client)
+
+
+@cache
+def get_last_comment_for_task(
+    task: str | dict, client: KitsuClient = default
+) -> dict | None:
+    """
+    Args:
+        task (str / dict): The task dict or the task ID.
+
+    Returns:
+        Last comment posted for given task.
+    """
+    task = normalize_model_parameter(task)
+    return raw.fetch_first(f"tasks/{task['id']}/comments", client=client)
+
+
+def assign_task(
+    task: str | dict, person: str | dict, client: KitsuClient = default
+) -> dict:
+    """
+    Assign one Person to a Task.
+    Args:
+        task (str / dict): The task dict or the task ID.
+        person (str / dict): The person dict or the person ID.
+
+    Returns:
+        (dict) the affected Task
+    """
+    person = normalize_model_parameter(person)
+    task = normalize_model_parameter(task)
+    path = f"/actions/persons/{person['id']}/assign"
+    return raw.put(path, {"task_ids": [task["id"]]}, client=client)
+
+
+def clear_assignations(
+    tasks: str | dict | list[str | dict],
+    person: str | dict | None = None,
+    client: KitsuClient = default,
+) -> list[str]:
+    """
+    Clear assignations for a single or multiple tasks.
+    If no person is given, all assignations are cleared.
+
+    Args:
+        tasks (list / str / dict): Task dict or the task ID, single or list.
+        person (str / dict): The person dict or the person ID.
+
+    Returns:
+        (list[str]) List of affected Task IDs
+    """
+    if not isinstance(tasks, list):
+        tasks = [tasks]
+    if not tasks:
+        # Nothing to clear: avoid a pointless 400 from the server.
+        return []
+    data = {}
+    for task in tasks:
+        task = normalize_model_parameter(task)
+        data.setdefault("task_ids", []).append(task["id"])
+    if person is not None:
+        person = normalize_model_parameter(person)
+        data["person_id"] = person["id"]
+    return raw.put(
+        "/actions/tasks/clear-assignation", data=data, client=client
+    )
+
+
+def new_task_type(
+    name: str,
+    color: str = "#000000",
+    for_entity: str = "Asset",
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Create a new task type with the given name.
+
+    If a Task Type with the given name already exists within Kitsu, it will
+    be returned.
+
+    Args:
+        name (str): The name of the task type
+        color (str): The color of the task type as an hexadecimal string
+        with # as first character. ex : #00FF00
+        for_entity (str): The entity type for which the task type is created.
+
+    Returns:
+        dict: The created task type
+    """
+    task_type = get_task_type_by_name(name, for_entity, client=client)
+    if task_type is None:
+        data = {"name": name, "color": color, "for_entity": for_entity}
+        task_type = raw.post("data/task-types", data, client=client)
+    return task_type
+
+
+def new_task_status(
+    name: str, short_name: str, color: str, client: KitsuClient = default
+) -> dict:
+    """
+    Create a new task status with the given name, short name and color.
+
+    Args:
+        name (str): The name of the task status
+        short_name (str): The short name of the task status
+        color (str): The color of the task status as an hexadecimal string
+        with # as first character. ex : #00FF00
+
+    Returns:
+        dict: The created task status
+    """
+    if not color or color[0] != "#":
+        raise ValueError("Color must start with '#', e.g. '#00FF00'")
+    if not all(c in string.hexdigits for c in color[1:]):
+        raise ValueError(
+            "Color must be a valid hexadecimal string, e.g. '#00FF00'"
+        )
+
+    data = {"name": name, "short_name": short_name, "color": color}
+    return raw.post("data/task-status", data, client=client)
+
+
+def update_task(task: dict, client: KitsuClient = default) -> dict:
+    """
+    Update given task into the API. Metadata are fully replaced by the ones
+    set on given task.
+
+    Args:
+        task (dict): The task dict to update.
+
+    Returns:
+        dict: Updated task.
+    """
+    if "assignees" in task:
+        # Copy before normalizing so the caller's dict is left untouched.
+        task = {
+            **task,
+            "assignees": normalize_list_of_models_for_links(task["assignees"]),
+        }
+    return raw.put(f"data/tasks/{task['id']}", task, client=client)
+
+
+def update_task_data(
+    task: str | dict,
+    data: dict | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Update the metadata for the provided task. Keys that are not provided are
+    not changed.
+
+    Args:
+        task (str / dict): The task dict or ID to save in database.
+        data (dict): Free field to set metadata of any kind.
+
+    Returns:
+        dict: Updated task.
+    """
+    if data is None:
+        data = {}
+    task = normalize_model_parameter(task)
+    # Invalidate the cache so the base read (and later reads) reflect the
+    # server state; merging onto a stale cached copy reverts concurrent edits.
+    get_task.clear_cache()
+    current_task = get_task(task["id"], client=client)
+
+    updated_task = {
+        "id": current_task["id"],
+        "data": {**(current_task["data"] or {}), **data},
+    }
+    result = update_task(updated_task, client=client)
+    get_task.clear_cache()
+    return result
+
+
+@cache
+def get_task_url(task: dict, client: KitsuClient = default) -> str:
+    """
+    Args:
+        task (dict): The task dict.
+
+    Returns:
+        url (str): Web url associated to the given task
+    """
+    if not isinstance(task, dict):
+        raise TaskMustBeADictException
+    host = raw.get_api_url_from_host(client=client)
+    return f"{host}/productions/{task['project_id']}/shots/tasks/{task['id']}/"
+
+
+@cache
+def all_tasks_for_project(
+    project: str | dict,
+    task_type: str | dict | None = None,
+    episode: str | dict | None = None,
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Args:
+        project (str / dict): The project (or its ID) to get tasks from.
+        task_type (str / dict): The task type (or its ID) to filter tasks.
+        episode (str / dict): The episode (or its ID) to filter tasks.
+
+    Returns:
+        list[dict]: Tasks related to given project.
+    """
+    project = normalize_model_parameter(project)
+    path = f"/data/projects/{project['id']}/tasks"
+    params = {}
+    if task_type is not None:
+        task_type = normalize_model_parameter(task_type)
+        params["task_type_id"] = task_type["id"]
+    if episode is not None:
+        episode = normalize_model_parameter(episode)
+        params["episode_id"] = episode["id"]
+    return raw.get(path, params=params, client=client)
+
+
+def update_comment(comment: dict, client: KitsuClient = default) -> dict:
+    """
+    Save given comment data into the API. Metadata are fully replaced by the ones
+    set on given comment.
+
+    Args:
+        comment (dict): The comment dict to update.
+
+    Returns:
+        dict: Updated comment.
+    """
+    return raw.put(f"data/comments/{comment['id']}", comment, client=client)
+
+
+@cache
+def all_open_tasks(client: KitsuClient = default) -> list[dict]:
+    """
+    Get all open tasks.
+
+    Returns:
+        list: Open tasks.
+    """
+    return raw.fetch_all("tasks/open-tasks", client=client)
+
+
+@cache
+def get_open_tasks_stats(client: KitsuClient = default) -> dict:
+    """
+    Get statistics for open tasks.
+
+    Returns:
+        dict: Open tasks statistics.
+    """
+    return raw.get("data/tasks/open-tasks/stats", client=client)
+
+
+@cache
+def all_previews_for_task(
+    task: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Get all previews for a task.
+
+    Args:
+        task (str / dict): The task dict or id.
+
+    Returns:
+        list: Previews for the task.
+    """
+    task = normalize_model_parameter(task)
+    return raw.fetch_all(f"tasks/{task['id']}/previews", client=client)
+
+
+@cache
+def all_tasks_for_person_and_type(
+    person: str | dict, task_type: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Get all tasks for a person and task type.
+
+    Args:
+        person (str / dict): The person dict or id.
+        task_type (str / dict): The task type dict or id.
+
+    Returns:
+        list: Tasks for the person and task type.
+    """
+    person = normalize_model_parameter(person)
+    task_type = normalize_model_parameter(task_type)
+    return raw.fetch_all(
+        f"persons/{person['id']}/related-tasks/{task_type['id']}",
+        client=client,
+    )
+
+
+@cache
+def all_comments_for_project(
+    project: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Get all comments for a project.
+
+    Args:
+        project (str / dict): The project dict or id.
+
+    Returns:
+        list: Comments for the project.
+    """
+    project = normalize_model_parameter(project)
+    return raw.fetch_all(f"projects/{project['id']}/comments", client=client)
+
+
+@cache
+def all_notifications_for_project(
+    project: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Get all notifications for a project.
+
+    Args:
+        project (str / dict): The project dict or id.
+
+    Returns:
+        list: Notifications for the project.
+    """
+    project = normalize_model_parameter(project)
+    return raw.fetch_all(
+        f"projects/{project['id']}/notifications", client=client
+    )
+
+
+@cache
+def all_preview_files_for_project(
+    project: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Get all preview files for a project.
+
+    Args:
+        project (str / dict): The project dict or id.
+
+    Returns:
+        list: Preview files for the project.
+    """
+    project = normalize_model_parameter(project)
+    return raw.fetch_all(
+        f"projects/{project['id']}/preview-files", client=client
+    )
+
+
+@cache
+def all_subscriptions_for_project(
+    project: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Get all subscriptions for a project.
+
+    Args:
+        project (str / dict): The project dict or id.
+
+    Returns:
+        list: Subscriptions for the project.
+    """
+    project = normalize_model_parameter(project)
+    return raw.fetch_all(
+        f"projects/{project['id']}/subscriptions", client=client
+    )
+
+
+@cache
+def get_persons_tasks_dates(client: KitsuClient = default) -> dict:
+    """
+    Get, for each person, the first and last task start/due dates.
+
+    Returns:
+        dict: Tasks dates for persons.
+    """
+    return raw.get("data/persons/task-dates", client=client)
+
+
+def remove_tasks_for_type(
+    project: str | dict, task_type: str | dict, client: KitsuClient = default
+) -> str:
+    """
+    Delete all tasks for a task type in a project.
+
+    Args:
+        project (str / dict): The project dict or id.
+        task_type (str / dict): The task type dict or id.
+    """
+    project = normalize_model_parameter(project)
+    task_type = normalize_model_parameter(task_type)
+    return raw.delete(
+        f"actions/projects/{project['id']}"
+        f"/task-types/{task_type['id']}/delete-tasks",
+        client=client,
+    )
+
+
+def remove_tasks_batch(
+    project: str | dict,
+    tasks: list[str | dict],
+    client: KitsuClient = default,
+) -> requests.Response:
+    """
+    Delete multiple tasks of a project in batch.
+
+    Args:
+        project (str / dict): The project the tasks belong to.
+        tasks (list): List of task dicts or IDs to delete.
+
+    Returns:
+        Response: Request response object.
+    """
+    project = normalize_model_parameter(project)
+    task_ids = [normalize_model_parameter(task)["id"] for task in tasks]
+    return raw.post(
+        f"actions/projects/{project['id']}/delete-tasks",
+        task_ids,
+        client=client,
+    )
+
+
+def assign_tasks_to_person(
+    tasks: list[str | dict], person: str | dict, client: KitsuClient = default
+) -> dict:
+    """
+    Assign multiple tasks to a person.
+
+    Args:
+        tasks (list): List of task dicts or IDs.
+        person (str / dict): The person dict or id.
+
+    Returns:
+        dict: Response information.
+    """
+    person = normalize_model_parameter(person)
+    task_ids = [normalize_model_parameter(task)["id"] for task in tasks]
+    return raw.put(
+        f"actions/persons/{person['id']}/assign",
+        {"task_ids": task_ids},
+        client=client,
+    )
+
+
+@cache
+def get_task_time_spent_for_date(
+    task: str | dict, date: str, client: KitsuClient = default
+) -> dict:
+    """
+    Get time spent for a task on a specific date.
+
+    Args:
+        task (str / dict): The task dict or id.
+        date (str): Date in YYYY-MM-DD format.
+
+    Returns:
+        dict: Time spent information.
+    """
+    task = normalize_model_parameter(task)
+    return raw.get(
+        f"actions/tasks/{task['id']}/time-spents/{date}",
+        client=client,
+    )
+
+
+def remove_time_spent(
+    time_spent: str | dict, client: KitsuClient = default
+) -> str:
+    """
+    Delete a time spent entry.
+
+    Args:
+        time_spent (str / dict): The time spent dict or id.
+
+    Returns:
+        Response: Request response object.
+    """
+    time_spent = normalize_model_parameter(time_spent)
+    return raw.delete(f"data/time-spents/{time_spent['id']}", client=client)
+
+
+def remove_preview_from_comment(
+    task: str | dict,
+    comment: str | dict,
+    preview_file: str | dict,
+    client: KitsuClient = default,
+) -> str:
+    """
+    Remove a preview from a comment.
+
+    Args:
+        task (str / dict): The task the comment belongs to.
+        comment (str / dict): The comment dict or id.
+        preview_file (str / dict): The preview file dict or id.
+    """
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    preview_file = normalize_model_parameter(preview_file)
+    return raw.delete(
+        f"actions/tasks/{task['id']}/comments/{comment['id']}"
+        f"/preview-files/{preview_file['id']}",
+        client=client,
+    )
+
+
+def move_comment_to_task(
+    task: str | dict,
+    comment: str | dict,
+    target_task: str | dict,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Move a comment from its current task to another task that belongs to the
+    same entity. Reserved to production managers and studio admins. The
+    original creation date, text, attachments, mentions and status change
+    carried by the comment are preserved. Notifications and news are rebuilt
+    against the target task as if a new comment was posted.
+
+    Args:
+        task (str / dict): The task dict or id currently holding the comment.
+        comment (str / dict): The comment dict or id to move.
+        target_task (str / dict): The destination task dict or id. Must
+            belong to the same entity as the current task.
+
+    Returns:
+        dict: Updated comment whose object_id is now the target task id.
+    """
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    target_task = normalize_model_parameter(target_task)
+    return raw.post(
+        f"actions/tasks/{task['id']}/comments/{comment['id']}/move",
+        {"target_task_id": target_task["id"]},
+        client=client,
+    )
+
+
+def acknowledge_comment(
+    task: str | dict,
+    comment: str | dict,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Acknowledge a comment or remove the acknowledgment if it's already acknowledged.
+
+    Args:
+        task (str / dict): The task dict or id.
+        comment (str / dict): The comment dict or id.
+
+    Returns:
+        dict: Updated comment.
+    """
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    return raw.post(
+        f"data/tasks/{task['id']}/comments/{comment['id']}/ack",
+        {},
+        client=client,
+    )
+
+
+def reply_to_comment(
+    task: str | dict,
+    comment: str | dict,
+    text: str,
+    person: str | dict | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Reply to an existing comment.
+
+    Args:
+        task (str / dict): The task the comment belongs to.
+        comment (str / dict): The comment dict or id to reply to.
+        text (str): The reply text.
+        person (str / dict): The person dict or id making the reply.
+
+    Returns:
+        dict: Created reply comment.
+    """
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    data = {"text": text}
+    if person is not None:
+        person = normalize_model_parameter(person)
+        data["person_id"] = person["id"]
+    return raw.post(
+        f"data/tasks/{task['id']}/comments/{comment['id']}/reply",
+        data,
+        client=client,
+    )
+
+
+def delete_comment_attachment(
+    task: str | dict,
+    comment: str | dict,
+    attachment_file: str | dict,
+    client: KitsuClient = default,
+) -> str:
+    """
+    Delete an attachment from a comment.
+
+    Args:
+        task (str / dict): The task the comment belongs to.
+        comment (str / dict): The comment dict or id.
+        attachment_file (str / dict): The attachment file dict or id.
+
+    Returns:
+        str: Request response object.
+    """
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    attachment_file = normalize_model_parameter(attachment_file)
+    return raw.delete(
+        f"data/tasks/{task['id']}/comments/{comment['id']}"
+        f"/attachments/{attachment_file['id']}",
+        client=client,
+    )
+
+
+def delete_comment_reply(
+    task: str | dict,
+    comment: str | dict,
+    reply: str | dict,
+    client: KitsuClient = default,
+) -> str:
+    """
+    Delete a reply to a comment.
+
+    Args:
+        task (str / dict): The task the comment belongs to.
+        comment (str / dict): The comment dict or id.
+        reply (str / dict): The reply comment dict or id.
+
+    Returns:
+        str: Request response object.
+    """
+    task = normalize_model_parameter(task)
+    comment = normalize_model_parameter(comment)
+    reply = normalize_model_parameter(reply)
+    return raw.delete(
+        f"data/tasks/{task['id']}/comments/{comment['id']}"
+        f"/reply/{reply['id']}",
+        client=client,
+    )
+
+
+def create_shot_tasks(
+    shot: str | dict,
+    task_types: list[str | dict],
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Create tasks for a shot.
+
+    Args:
+        shot (str / dict): The shot dict or id.
+        task_types (list): List of task type dicts or IDs.
+
+    Returns:
+        list: Created tasks.
+    """
+    return create_entity_tasks(shot, task_types, client=client)
+
+
+def create_asset_tasks(
+    asset: str | dict,
+    task_types: list[str | dict],
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Create tasks for an asset.
+
+    Args:
+        asset (str / dict): The asset dict or id.
+        task_types (list): List of task type dicts or IDs.
+
+    Returns:
+        list: Created tasks.
+    """
+    return create_entity_tasks(asset, task_types, client=client)
+
+
+def create_edit_tasks(
+    edit: str | dict,
+    task_types: list[str | dict],
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Create tasks for an edit.
+
+    Args:
+        edit (str / dict): The edit dict or id.
+        task_types (list): List of task type dicts or IDs.
+
+    Returns:
+        list: Created tasks.
+    """
+    return create_entity_tasks(edit, task_types, client=client)
+
+
+def create_concept_tasks(
+    concept: str | dict,
+    task_types: list[str | dict],
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Create tasks for a concept.
+
+    Args:
+        concept (str / dict): The concept dict or id.
+        task_types (list): List of task type dicts or IDs.
+
+    Returns:
+        list: Created tasks.
+    """
+    return create_entity_tasks(concept, task_types, client=client)
+
+
+def create_entity_tasks(
+    entity: str | dict,
+    task_types: list[str | dict],
+    client: KitsuClient = default,
+) -> list[dict]:
+    """
+    Create tasks for an entity.
+
+    Args:
+        entity (str / dict): The entity dict or id.
+        task_types (list): List of task type dicts or IDs.
+
+    Returns:
+        list: Created tasks.
+    """
+    entity = normalize_model_parameter(entity)
+    task_type_ids = [
+        normalize_model_parameter(task_type)["id"] for task_type in task_types
+    ]
+    return raw.post(
+        f"data/entities/{entity['id']}/tasks",
+        {"task_type_ids": task_type_ids},
+        client=client,
+    )

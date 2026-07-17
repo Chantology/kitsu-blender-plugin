@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+from . import client as raw
+
+from .sorting import sort_by_name
+from .cache import cache
+from .client import KitsuClient
+from .helpers import normalize_model_parameter
+from . import shot as gazu_shot
+
+default = raw.default_client
+
+
+def new_scene(
+    project: str | dict,
+    sequence: str | dict,
+    name: str,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Create a scene for given sequence.
+    """
+    project = normalize_model_parameter(project)
+    sequence = normalize_model_parameter(sequence)
+    scene = {"name": name, "sequence_id": sequence["id"]}
+    return raw.post(
+        f"data/projects/{project['id']}/scenes", scene, client=client
+    )
+
+
+@cache
+def all_scenes(
+    project: str | dict | None = None, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Retrieve all scenes.
+    """
+    project = normalize_model_parameter(project)
+    if project is not None:
+        scenes = raw.fetch_all(
+            f"projects/{project['id']}/scenes", client=client
+        )
+    else:
+        scenes = raw.fetch_all("scenes/all", client=client)
+    return sort_by_name(scenes)
+
+
+def all_scenes_for_project(
+    project: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Retrieve all scenes for given project.
+    """
+    # No @cache here: all_scenes already caches.
+    return all_scenes(project, client=client)
+
+
+@cache
+def all_scenes_for_sequence(
+    sequence: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Retrieve all scenes which are children from given sequence.
+    """
+    sequence = normalize_model_parameter(sequence)
+    return sort_by_name(
+        raw.fetch_all(f"sequences/{sequence['id']}/scenes", client=client),
+    )
+
+
+@cache
+def get_scene(scene_id: str, client: KitsuClient = default) -> dict:
+    """
+    Return scene corresponding to given scene ID.
+    """
+    return raw.fetch_one("scenes", scene_id, client=client)
+
+
+@cache
+def get_scene_by_name(
+    sequence: str | dict, scene_name: str, client: KitsuClient = default
+) -> dict | None:
+    """
+    Returns scene corresponding to given sequence and name.
+    """
+    sequence = normalize_model_parameter(sequence)
+    return raw.fetch_first(
+        "scenes/all",
+        {"parent_id": sequence["id"], "name": scene_name},
+        client=client,
+    )
+
+
+def update_scene(scene: dict, client: KitsuClient = default) -> dict:
+    """
+    Save given scene data into the API.
+    """
+    return raw.put(f"data/entities/{scene['id']}", scene, client=client)
+
+
+def new_scene_asset_instance(
+    scene: str | dict,
+    asset: str | dict,
+    description: str | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Creates a new asset instance on given scene. The instance number is
+    automatically generated (increment highest number).
+    """
+    scene = normalize_model_parameter(scene)
+    asset = normalize_model_parameter(asset)
+    data = {"asset_id": asset["id"]}
+
+    if description is not None:
+        data["description"] = description
+
+    return raw.post(
+        f"data/scenes/{scene['id']}/asset-instances", data, client=client
+    )
+
+
+@cache
+def all_asset_instances_for_scene(
+    scene: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Return the list of asset instances listed in a scene.
+    """
+    scene = normalize_model_parameter(scene)
+    return raw.get(f"data/scenes/{scene['id']}/asset-instances", client=client)
+
+
+@cache
+def get_asset_instance_by_name(
+    scene: str | dict, name: str, client: KitsuClient = default
+) -> dict | None:
+    """
+    Returns the asset instance of the scene that has the given name.
+    """
+    scene = normalize_model_parameter(scene)
+    return raw.fetch_first(
+        "asset-instances",
+        {"name": name, "scene_id": scene["id"]},
+        client=client,
+    )
+
+
+@cache
+def all_camera_instances_for_scene(
+    scene: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Return the list of camera instances listed in a scene.
+    """
+    scene = normalize_model_parameter(scene)
+    return raw.get(
+        f"data/scenes/{scene['id']}/camera-instances", client=client
+    )
+
+
+@cache
+def all_shots_for_scene(
+    scene: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Return the list of shots issued from given scene.
+    """
+    scene = normalize_model_parameter(scene)
+    return raw.get(f"data/scenes/{scene['id']}/shots", client=client)
+
+
+def add_shot_to_scene(
+    scene: str | dict, shot: str | dict, client: KitsuClient = default
+) -> dict:
+    """
+    Link a shot to a scene to mark the fact it was generated out from that
+    scene.
+    """
+    scene = normalize_model_parameter(scene)
+    shot = normalize_model_parameter(shot)
+    data = {"shot_id": shot["id"]}
+    return raw.post(f"data/scenes/{scene['id']}/shots", data, client=client)
+
+
+def remove_shot_from_scene(
+    scene: str | dict, shot: str | dict, client: KitsuClient = default
+) -> str:
+    """
+    Remove link between a shot and a scene.
+    """
+    scene = normalize_model_parameter(scene)
+    shot = normalize_model_parameter(shot)
+    return raw.delete(
+        f"data/scenes/{scene['id']}/shots/{shot['id']}", client=client
+    )
+
+
+def update_asset_instance_name(
+    asset_instance: dict, name: str, client: KitsuClient = default
+) -> dict:
+    """
+    Update the name of given asset instance.
+    """
+    path = f"/data/asset-instances/{asset_instance['id']}"
+    return raw.put(path, {"name": name}, client=client)
+
+
+def update_asset_instance_data(
+    asset_instance: str | dict, data: dict, client: KitsuClient = default
+) -> dict:
+    """
+    Update the extra data of given asset instance.
+    """
+    asset_instance = normalize_model_parameter(asset_instance)
+    path = f"/data/asset-instances/{asset_instance['id']}"
+    return raw.put(path, {"data": data}, client=client)
+
+
+@cache
+def get_sequence_from_scene(
+    scene: str | dict, client: KitsuClient = default
+) -> dict:
+    """
+    Return sequence which is parent of given scene.
+    """
+    scene = normalize_model_parameter(scene)
+    if "parent_id" not in scene:
+        # Only an ID was given: fetch the full scene to read its parent.
+        scene = get_scene(scene["id"], client=client)
+    return gazu_shot.get_sequence(scene["parent_id"], client=client)

@@ -1,0 +1,553 @@
+from __future__ import annotations
+
+import requests
+
+from typing_extensions import Literal
+
+from . import client as raw
+
+from .helpers import normalize_model_parameter
+from .sorting import sort_by_name
+
+from .cache import cache
+from .client import KitsuClient
+
+default = raw.default_client
+
+
+@cache
+def all_playlists(client: KitsuClient = default) -> list[dict]:
+    """
+    Returns:
+        list: All playlists for all projects.
+    """
+    return sort_by_name(raw.fetch_all("playlists", client=client))
+
+
+@cache
+def all_shots_for_playlist(
+    playlist: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        playlist (str / dict): The playlist dict or the playlist ID.
+
+    Returns:
+        list: All shots linked to the given playlist
+    """
+    playlist = normalize_model_parameter(playlist)
+    playlist = raw.fetch_one("playlists", playlist["id"], client=client)
+    return sort_by_name(playlist["shots"])
+
+
+@cache
+def all_playlists_for_project(
+    project: str | dict, client: KitsuClient = default, page: int = 1
+) -> list[dict]:
+    """
+    Args:
+        project (str / dict): The project dict or the project ID.
+        page (int): Page number for pagination
+
+    Returns:
+        list: All playlists for the given project
+    """
+    project = normalize_model_parameter(project)
+    return sort_by_name(
+        raw.fetch_all(
+            f"projects/{project['id']}/playlists",
+            params={"page": page},
+            client=client,
+        )
+    )
+
+
+@cache
+def all_playlists_for_episode(
+    episode: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Args:
+        episode (str / dict): The episode dict or the episode ID.
+
+    Returns:
+        list: All playlists for the given episode.
+    """
+    episode = normalize_model_parameter(episode)
+    # Fetch the episode when only an ID was given, to get its project_id.
+    if "project_id" not in episode:
+        episode = raw.fetch_one("episodes", episode["id"], client=client)
+    project = normalize_model_parameter(episode["project_id"])
+    return sort_by_name(
+        raw.fetch_all(
+            f"projects/{project['id']}/episodes/{episode['id']}/playlists",
+            client=client,
+        )
+    )
+
+
+@cache
+def get_playlist(playlist: str | dict, client: KitsuClient = default) -> dict:
+    """
+    Args:
+        playlist (str / dict): The playlist dict or the playlist ID.
+
+    Returns:
+        dict: playlist object for given id.
+    """
+    playlist = normalize_model_parameter(playlist)
+    return raw.fetch_one("playlists", playlist["id"], client=client)
+
+
+@cache
+def get_playlist_by_name(
+    project: str | dict, name: str, client: KitsuClient = default
+) -> dict | None:
+    """
+    Args:
+        project (str / dict): The project dict or the project ID.
+        name (str): The playlist name
+
+    Returns:
+        dict: Playlist matching given name for given project.
+    """
+    project = normalize_model_parameter(project)
+    params = {"project_id": project["id"], "name": name}
+    return raw.fetch_first("playlists", params=params, client=client)
+
+
+def new_playlist(
+    project: str | dict,
+    name: str,
+    episode: str | dict | None = None,
+    for_entity: Literal[
+        "shot", "asset", "sequence", "edit", "episode"
+    ] = "shot",
+    for_client: bool = False,
+    is_for_all: bool = False,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Create a new playlist in the database for given project.
+
+    Args:
+        project (str / dict): The project dict or the project ID.
+        name (str): Playlist name.
+        episode (str / dict / None): Optional episode dict or ID. If None, the
+            playlist is project-level; set is_for_all=True to place it under
+            "All Assets" in the web UI.
+        for_entity (str): The type of entity to include in the playlist, can
+            be one of "asset", "edit", "episode", "sequence" or "shot".
+        for_client (bool): Whether the playlist should be shared with clients.
+        is_for_all (bool): If True and episode is None, the playlist is
+            created under "All Assets" instead of "Main Pack" in the web UI.
+
+    Returns:
+        dict: Created playlist.
+    """
+    project = normalize_model_parameter(project)
+    data = {
+        "name": name,
+        "project_id": project["id"],
+        "for_entity": for_entity,
+        "for_client": for_client,
+        "is_for_all": is_for_all,
+    }
+    if episode is not None:
+        episode = normalize_model_parameter(episode)
+        data["episode_id"] = episode["id"]
+    playlist = get_playlist_by_name(project, name, client=client)
+    if playlist is None:
+        playlist = raw.post("data/playlists/", data, client=client)
+    return playlist
+
+
+def update_playlist(playlist: dict, client: KitsuClient = default) -> dict:
+    """
+    Save given playlist data into the API. Metadata are fully replaced by
+    the ones set on given playlist.
+
+    Args:
+        playlist (dict): The playlist dict to update.
+
+    Returns:
+        dict: Updated playlist.
+    """
+    return raw.put(f"data/playlists/{playlist['id']}", playlist, client=client)
+
+
+def get_entity_preview_files(
+    entity: str | dict, client: KitsuClient = default
+) -> dict[str, list[dict]]:
+    """
+    Get all preview files grouped by task type for a given entity.
+
+    Args:
+        entity (str / dict): The entity to retrieve files from or its ID.
+
+    Returns:
+        dict: A dict where keys are task type IDs and value array of revisions.
+    """
+    entity = normalize_model_parameter(entity)
+    return raw.get(
+        f"data/playlists/entities/{entity['id']}/preview-files",
+        client=client,
+    )
+
+
+def add_entity_to_playlist(
+    playlist: dict,
+    entity: str | dict,
+    preview_file: str | dict | None = None,
+    persist: bool = True,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Add an entity to the playlist, use the last uploaded preview as revision
+    to review.
+
+    Args:
+        playlist (dict): The playlist to add the entity to. The argument is
+            not mutated: use the returned playlist.
+        entity (str / dict): The entity to add or its ID.
+        preview_file (str / dict): Set it to force a give revision to review.
+        persist (bool): Set it to True to save the result to the API.
+
+    Returns:
+        dict: Updated playlist.
+    """
+    entity = normalize_model_parameter(entity)
+
+    if preview_file is None:
+        preview_files = get_entity_preview_files(entity, client=client)
+        for task_type_id in preview_files.keys():
+            task_type_files = preview_files[task_type_id]
+            if not task_type_files:
+                continue
+            first_file = task_type_files[0]
+            if (
+                preview_file is None
+                or preview_file["created_at"] < first_file["created_at"]
+            ):
+                preview_file = first_file
+
+    entry = {"entity_id": entity["id"]}
+    if preview_file is not None:
+        preview_file = normalize_model_parameter(preview_file)
+        entry["preview_file_id"] = preview_file["id"]
+
+    if persist:
+        return raw.post(
+            f"actions/playlists/{playlist['id']}/add-entity",
+            entry,
+            client=client,
+        )
+
+    updated = dict(playlist)
+    updated["shots"] = list(updated.get("shots") or [])
+    updated["shots"].append(entry)
+    return updated
+
+
+def remove_entity_from_playlist(
+    playlist: dict,
+    entity: str | dict,
+    persist: bool = True,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Remove all occurences of a given entity from a playlist.
+
+    Args:
+        playlist (dict): Playlist object to modify
+        entity (str / dict): the entity to remove or its ID
+        persist (bool): Set it to True to save the result to the API.
+
+    Returns:
+        dict: Updated playlist.
+    """
+    entity = normalize_model_parameter(entity)
+    playlist["shots"] = [
+        entry
+        for entry in playlist["shots"]
+        if entry["entity_id"] != entity["id"]
+    ]
+    if persist:
+        update_playlist(playlist, client=client)
+    return playlist
+
+
+def update_entity_preview(
+    playlist: dict,
+    entity: str | dict,
+    preview_file: str | dict,
+    persist: bool = True,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Update the preview file linked to a given entity in a playlist.
+
+    Args:
+        playlist (dict): Playlist object to modify.
+        entity (str / dict): The entity to update the preview file for.
+        preview_file (str / dict): The new preview file to set for the entity.
+        persist (bool): Set it to True to save the result to the API.
+
+    Returns:
+        dict: Updated playlist.
+    """
+    entity = normalize_model_parameter(entity)
+    preview_file = normalize_model_parameter(preview_file)
+    for entry in playlist["shots"]:
+        if entry["entity_id"] == entity["id"]:
+            entry["preview_file_id"] = preview_file["id"]
+    if persist:
+        update_playlist(playlist, client=client)
+    return playlist
+
+
+def delete_playlist(
+    playlist: str | dict, client: KitsuClient = default
+) -> str:
+    """
+    Delete a playlist.
+
+    Args:
+        playlist (str / dict): The playlist dict or id.
+
+    Returns:
+        str: The API response text.
+    """
+    playlist = normalize_model_parameter(playlist)
+    return raw.delete(f"data/playlists/{playlist['id']}", client=client)
+
+
+@cache
+def get_build_job(
+    playlist: str | dict,
+    build_job: str | dict,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Get a build job.
+
+    Args:
+        playlist (str / dict): The playlist the build job belongs to.
+        build_job (str / dict): The build job dict or id.
+
+    Returns:
+        dict: Build job information.
+    """
+    playlist = normalize_model_parameter(playlist)
+    build_job = normalize_model_parameter(build_job)
+    return raw.get(
+        f"data/playlists/{playlist['id']}/jobs/{build_job['id']}",
+        client=client,
+    )
+
+
+def remove_build_job(
+    playlist: str | dict,
+    build_job: str | dict,
+    client: KitsuClient = default,
+) -> str:
+    """
+    Delete a build job.
+
+    Args:
+        playlist (str / dict): The playlist the build job belongs to.
+        build_job (str / dict): The build job dict or id.
+    """
+    playlist = normalize_model_parameter(playlist)
+    build_job = normalize_model_parameter(build_job)
+    return raw.delete(
+        f"data/playlists/{playlist['id']}/jobs/{build_job['id']}",
+        client=client,
+    )
+
+
+@cache
+def all_build_jobs_for_project(
+    project: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    Get all build jobs for a project.
+
+    Args:
+        project (str / dict): The project dict or id.
+
+    Returns:
+        list: All build jobs for the project.
+    """
+    project = normalize_model_parameter(project)
+    return raw.fetch_all(f"projects/{project['id']}/build-jobs", client=client)
+
+
+def build_playlist_movie(
+    playlist: str | dict, client: KitsuClient = default
+) -> dict:
+    """
+    Build a movie for a playlist.
+
+    Args:
+        playlist (str / dict): The playlist dict or id.
+
+    Returns:
+        dict: Build job information.
+    """
+    playlist = normalize_model_parameter(playlist)
+    return raw.get(f"data/playlists/{playlist['id']}/build/mp4", client=client)
+
+
+def download_playlist_build(
+    playlist: str | dict,
+    build_job: str | dict,
+    file_path: str,
+    client: KitsuClient = default,
+    progress_callback=None,
+) -> requests.Response:
+    """
+    Download a playlist build.
+
+    Args:
+        playlist (str / dict): The playlist dict or id.
+        build_job (str / dict): The build job dict or id.
+        file_path (str): The location to store the file on the hard drive.
+
+    Returns:
+        Response: Request response object.
+    """
+    playlist = normalize_model_parameter(playlist)
+    build_job = normalize_model_parameter(build_job)
+    path = f"data/playlists/{playlist['id']}/jobs/{build_job['id']}/build/mp4"
+    return raw.download(
+        path, file_path, client=client, progress_callback=progress_callback
+    )
+
+
+def download_playlist_zip(
+    playlist: str | dict,
+    file_path: str,
+    client: KitsuClient = default,
+    progress_callback=None,
+) -> requests.Response:
+    """
+    Download a playlist as a zip file.
+
+    Args:
+        playlist (str / dict): The playlist dict or id.
+        file_path (str): The location to store the file on the hard drive.
+
+    Returns:
+        Response: Request response object.
+    """
+    playlist = normalize_model_parameter(playlist)
+    path = f"data/playlists/{playlist['id']}/download/zip"
+    return raw.download(
+        path, file_path, client=client, progress_callback=progress_callback
+    )
+
+
+def generate_temp_playlist(
+    project: str | dict, data: dict, client: KitsuClient = default
+) -> dict:
+    """
+    Generate a temporary playlist.
+
+    Args:
+        project (str / dict): The project dict or id.
+        data (dict): Playlist generation data.
+
+    Returns:
+        dict: Generated temporary playlist.
+    """
+    project = normalize_model_parameter(project)
+    return raw.post(
+        f"data/projects/{project['id']}/playlists/temp", data, client=client
+    )
+
+
+def notify_clients_playlist_ready(
+    playlist: str | dict, client: KitsuClient = default
+) -> dict:
+    """
+    Notify clients that a playlist is ready.
+
+    Args:
+        playlist (str / dict): The playlist dict or id.
+
+    Returns:
+        dict: Notification response.
+    """
+    playlist = normalize_model_parameter(playlist)
+    return raw.post(
+        f"data/playlists/{playlist['id']}/notify-clients", {}, client=client
+    )
+
+
+def new_share_link(
+    playlist: str | dict,
+    expiration_date: str | None = None,
+    can_comment: bool = True,
+    password: str | None = None,
+    client: KitsuClient = default,
+) -> dict:
+    """
+    Generate a share link for a playlist. Only managers and above can
+    call this.
+
+    Args:
+        playlist (str / dict): The playlist dict or ID.
+        expiration_date (str): Optional ISO date for link expiry.
+        can_comment (bool): Whether guests can comment (default True).
+        password (str): Optional password protection.
+
+    Returns:
+        dict: Created share link with token.
+    """
+    playlist = normalize_model_parameter(playlist)
+    data = {"can_comment": can_comment}
+    if expiration_date:
+        data["expiration_date"] = expiration_date
+    if password:
+        data["password"] = password
+    return raw.post(
+        f"data/playlists/{playlist['id']}/share", data, client=client
+    )
+
+
+def all_share_links_for_playlist(
+    playlist: str | dict, client: KitsuClient = default
+) -> list[dict]:
+    """
+    List all active share links for a playlist.
+
+    Args:
+        playlist (str / dict): The playlist dict or ID.
+
+    Returns:
+        list: Active share links.
+    """
+    playlist = normalize_model_parameter(playlist)
+    return raw.fetch_all(f"playlists/{playlist['id']}/share", client=client)
+
+
+def remove_share_link(
+    playlist: str | dict,
+    token: str,
+    client: KitsuClient = default,
+) -> str:
+    """
+    Revoke (deactivate) a share link.
+
+    Args:
+        playlist (str / dict): The playlist dict or ID.
+        token (str): The share link token to revoke.
+
+    Returns:
+        str: API response.
+    """
+    playlist = normalize_model_parameter(playlist)
+    return raw.delete(
+        f"data/playlists/{playlist['id']}/share/{token}", client=client
+    )
