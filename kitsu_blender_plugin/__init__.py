@@ -10,7 +10,7 @@ feature list and installation instructions.
 bl_info = {
     "name": "Kitsu",
     "author": "Kitsu Blender Plugin contributors",
-    "version": (1, 0, 0),
+    "version": (1, 0, 2),
     "blender": (5, 2, 0),
     "location": "3D Viewport > Sidebar (N) > Kitsu",
     "description": (
@@ -38,6 +38,7 @@ _CLASSES = (
 def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
+    preferences.ensure_addon_entry()
     bpy.types.WindowManager.kitsu = bpy.props.PointerProperty(type=properties.KitsuSessionProperties)
     # Scene-scoped (not WindowManager, unlike the rest of this addon's UI
     # state): saved into the .blend file itself, so a manual task-type
