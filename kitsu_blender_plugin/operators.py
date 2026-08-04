@@ -992,7 +992,9 @@ class KITSU_OT_add_variation_from_viewport(bpy.types.Operator):
     def execute(self, context):
         path = os.path.join(paths.session_cache_dir(), f"variation_{uuid.uuid4().hex}.png")
         try:
-            blender_scene.capture_viewport(path)
+            blender_scene.capture_viewport(
+                path, get_preferences(context).preview_render_time_limit
+            )
         except blender_scene.BlenderSceneError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}

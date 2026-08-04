@@ -58,7 +58,23 @@ capabilities are different:
   with `QPainter`, which isn't available here at all.
 - **Viewport capture** uses `bpy.ops.render.opengl` (Blender's own
   OpenGL/viewport render operator) instead of a Maya playblast or Houdini
-  flipbook.
+  flipbook. Overlays and gizmos are hidden for the duration, so a preview
+  shows the shot rather than the working viewport (grid, selection outlines).
+  Captures inherit the viewport's live shading — with one exception Blender
+  itself imposes: **'Rendered' shading with an add-on render engine (Cycles,
+  or any third-party engine) cannot be captured from the viewport at all**
+  (Blender's external-engine draw callback is a no-op with no interactive
+  context, so the frame comes out as bare overlays over the theme
+  background). A single-frame capture in that state falls back to a real
+  render instead — bounded by the **Preview Render Time Limit** add-on
+  preference (default 30s, 0 for unlimited), because Blender's UI is frozen
+  for the whole render: an unbounded capture of a production lookdev asset at
+  514 samples measured ~22 minutes. The limit caps Cycles sampling only, so a
+  heavy scene still pays for its own mesh/hair evaluation and BVH build before
+  the first sample. A full-range video capture refuses with an explanation
+  rather than rendering for hours or publishing unshaded frames. Solid and
+  Material Preview are drawn by Blender's own internal engines and work
+  normally on any render engine.
 - **Full-scene video export** ("Publish Capture") is actually *simpler*
   here than on every other host: Blender's own render pipeline links
   ffmpeg directly, so a full-range video is written in one step with no
@@ -174,6 +190,11 @@ login attempt with a specific message, not the whole add-on.
      the automatic attempt just fails quietly into the status line, and
      logging in with your password once more replaces it with a fresh one.
    - Your avatar and a "Welcome, `<name>`" line appear once logged in.
+   - **Edit > Preferences > Add-ons > Kitsu** also holds *Preview Render Time
+     Limit* — how long a capture may spend rendering when the viewport is on
+     Rendered shading with Cycles (default 30s; 0 renders at the scene's full
+     sample count). Nothing else needs it; the connection fields are all
+     editable from the sidebar.
 2. Save your `.blend` file somewhere matching your project's folder
    convention, then open the **Task** section and click **Detect Task**.
    Both asset and shot contexts are supported:

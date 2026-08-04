@@ -47,6 +47,18 @@ class KitsuAddonPreferences(bpy.types.AddonPreferences):
         "email/password login",
         default="",
     )
+    preview_render_time_limit: bpy.props.IntProperty(
+        name="Preview Render Time Limit (s)",
+        description="When a capture has to fall back to a real render "
+        "('Rendered' viewport shading on Cycles), stop sampling after this "
+        "many seconds instead of rendering the scene's full sample count. "
+        "Blender is unresponsive while it renders, so this bounds the wait. "
+        "0 renders at full quality with no limit. Only affects Kitsu "
+        "captures — the scene's own render settings are left untouched",
+        default=30,
+        min=0,
+        soft_max=600,
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -58,6 +70,8 @@ class KitsuAddonPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "email")
         layout.prop(self, "project_id")
         layout.prop(self, "api_token")
+        layout.separator()
+        layout.prop(self, "preview_render_time_limit")
 
 
 def ensure_addon_entry():

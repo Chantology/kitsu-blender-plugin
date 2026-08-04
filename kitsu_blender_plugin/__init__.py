@@ -10,7 +10,7 @@ feature list and installation instructions.
 bl_info = {
     "name": "Kitsu",
     "author": "Kitsu Blender Plugin contributors",
-    "version": (1, 0, 2),
+    "version": (1, 0, 4),
     "blender": (5, 2, 0),
     "location": "3D Viewport > Sidebar (N) > Kitsu",
     "description": (

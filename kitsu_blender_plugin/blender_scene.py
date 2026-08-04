@@ -147,6 +147,138 @@ def _temporary_camera_view(region_3d):
             pass
 
 
+# Blender's own render engines — the only ones its OpenGL/viewport render can
+# draw with (see `_needs_full_render`). Deliberately an allowlist of built-ins
+# rather than a denylist of add-on engines: an add-on engine only shows up in
+# `bpy.types.RenderEngine.__subclasses__()` while that add-on is actually
+# loaded, so a session where Cycles never registered (it is not in the
+# launcher's `--addons` list, and a machine whose preferences do not enable it
+# will not load it) would report a scene's leftover engine="CYCLES" as "not an
+# add-on engine" and take the broken viewport path. Testing against the
+# built-ins instead means an unknown or unregistered engine id always errs
+# toward a real render.
+#
+# BLENDER_EEVEE_NEXT is EEVEE's id on Blender 4.2-4.5 only; harmless to keep
+# listed on 5.x, where the id is BLENDER_EEVEE again.
+_INTERNAL_RENDER_ENGINES = {
+    "BLENDER_EEVEE",
+    "BLENDER_EEVEE_NEXT",
+    "BLENDER_WORKBENCH",
+}
+
+
+def _addon_render_engine_ids():
+    """Identifiers of the render engines registered by add-ons in this
+    session — Cycles, plus any third-party engine (Octane, V-Ray...).
+
+    Diagnostic only; `_needs_full_render` intentionally does not depend on it
+    (see `_INTERNAL_RENDER_ENGINES` above). Note that introspecting
+    `RenderSettings.bl_rna`'s `engine` enum is useless for this — it lists
+    only the built-ins and omits Cycles even when Cycles is enabled and
+    selected (verified on Blender 5.2).
+    """
+    return {
+        cls.bl_idname
+        for cls in bpy.types.RenderEngine.__subclasses__()
+        if getattr(cls, "bl_idname", None)
+    }
+
+
+def _needs_full_render(scene, space):
+    """Whether capturing `space` would need a real render instead of a
+    viewport/OpenGL render to show what the artist actually sees.
+
+    True only for the one combination Blender's OpenGL render cannot
+    reproduce: 'Rendered' viewport shading with an add-on render engine.
+    During `render.opengl` there is no interactive context, and Blender's
+    external-engine draw callback is a no-op without one — so the add-on
+    engine contributes nothing and the capture comes out as bare overlays
+    (grid, selection outlines, gizmos) over the theme background, written
+    instantly because no rendering ever happened. Confirmed on Blender 5.2:
+    an identical scene captured with Cycles + Rendered produced only the
+    cube's outline, while EEVEE + Rendered produced a correctly shaded cube
+    and the world background.
+
+    Solid and Material Preview are unaffected on any engine — both are drawn
+    by Blender's own internal engines (Workbench / EEVEE), which do work in
+    the offscreen context, so those keep the fast viewport-render path.
+    """
+    shading = getattr(getattr(space, "shading", None), "type", None)
+    return shading == "RENDERED" and scene.render.engine not in _INTERNAL_RENDER_ENGINES
+
+
+@contextlib.contextmanager
+def _temporary_clean_viewport(space):
+    """Hide the captured viewport's overlays and gizmos for the duration of
+    the block, restoring them afterward.
+
+    Blender's viewport render honours the viewport's own overlay settings, so
+    without this a published preview carries whatever the artist happened to
+    have switched on — floor grid, orange selection outlines, the transform
+    gizmo, relationship lines. Reviewers in Kitsu should see the shot, not
+    the working viewport.
+    """
+    overlay = getattr(space, "overlay", None)
+    saved_overlays = getattr(overlay, "show_overlays", None)
+    saved_gizmo = getattr(space, "show_gizmo", None)
+    try:
+        if saved_overlays is not None:
+            overlay.show_overlays = False
+        if saved_gizmo is not None:
+            space.show_gizmo = False
+        yield
+    finally:
+        if saved_overlays is not None:
+            overlay.show_overlays = saved_overlays
+        if saved_gizmo is not None:
+            space.show_gizmo = saved_gizmo
+
+
+@contextlib.contextmanager
+def _temporary_cycles_time_limit(scene, seconds):
+    """Cap a Cycles render at `seconds` for the duration of the block.
+
+    Cycles' own `time_limit` (Render Properties > Sampling > Render > Time
+    Limit): sampling stops when the budget runs out and the result is
+    denoised and returned as normal, so a capture costs a predictable wait
+    instead of the scene's full sample count. Measured on a production
+    lookdev asset at 514 samples, an unbounded capture took ~22 minutes of
+    completely frozen Blender.
+
+    Bounds *sampling only* — scene sync, mesh/hair evaluation and BVH build
+    happen before the first sample and are not covered, so a heavy scene
+    still costs whatever its sync costs. `seconds` of 0/None means no limit,
+    and engines other than Cycles have no equivalent setting, so both are
+    no-ops here.
+    """
+    cycles = getattr(scene, "cycles", None)
+    if not seconds or cycles is None or not hasattr(cycles, "time_limit"):
+        yield
+        return
+    saved = cycles.time_limit
+    cycles.time_limit = float(seconds)
+    try:
+        yield
+    finally:
+        cycles.time_limit = saved
+
+
+def _set_still_image_output(render):
+    """Point `render`'s output settings at a single PNG still.
+
+    `media_type` has to be set before `file_format` on Blender 5.x: with
+    media_type='VIDEO' (which is what a scene configured to output an FFmpeg
+    movie has), `file_format` only accepts 'FFMPEG' and assigning "PNG"
+    raises outright — so a capture from such a scene would fail before it
+    ever rendered. Both are saved and restored by
+    `_temporary_render_settings`, so this only applies for the capture.
+    """
+    image_settings = render.image_settings
+    if hasattr(image_settings, "media_type"):
+        image_settings.media_type = "IMAGE"
+    image_settings.file_format = "PNG"
+
+
 @contextlib.contextmanager
 def _temporary_render_settings(scene):
     """Save/restore the handful of render settings this module touches, so
@@ -189,8 +321,12 @@ def _temporary_render_settings(scene):
                 setattr(render.ffmpeg, key, value)
 
 
-def capture_viewport(target_path):
+def capture_viewport(target_path, render_time_limit=None):
     """Capture the current frame of the active viewport to `target_path`.
+
+    `render_time_limit` (seconds) only applies to the full-render fallback
+    below, and only on Cycles — see `_temporary_cycles_time_limit`. None or 0
+    renders at the scene's own full quality.
 
     Uses Blender's OpenGL/viewport render (`render.opengl`) rather than a
     full renderer so what gets published is exactly what's on screen,
@@ -202,6 +338,10 @@ def capture_viewport(target_path):
     keeps the viewport's own live shading (Material Preview/Rendered/
     Solid+color/etc.) while still framing exactly through the scene's
     actual camera, matching what a real render sees.
+
+    The one shading mode the viewport render cannot reproduce — 'Rendered'
+    with an add-on engine such as Cycles — falls back to a real render
+    instead (see `_needs_full_render` and `_render_still_with_engine`).
     """
     scene = bpy.context.scene
     target_dir = os.path.dirname(target_path) or "."
@@ -215,6 +355,10 @@ def capture_viewport(target_path):
             "before capturing."
         )
 
+    space = override["area"].spaces.active
+    if _needs_full_render(scene, space):
+        return _render_still_with_engine(scene, target_path, render_time_limit)
+
     # Blender's write_still always appends a frame-number suffix to
     # render.filepath (e.g. "capture0001.png"), so — exactly like the Maya
     # port's playblast handling — capture into a private temp dir and move
@@ -222,9 +366,11 @@ def capture_viewport(target_path):
     # rather than predicting Blender's own naming.
     capture_dir = tempfile.mkdtemp(prefix="kitsu_capture_")
     try:
-        with _temporary_render_settings(scene), _temporary_camera_view(region_3d):
+        with _temporary_render_settings(scene), _temporary_camera_view(
+            region_3d
+        ), _temporary_clean_viewport(space):
             scene.render.filepath = os.path.join(capture_dir, "capture")
-            scene.render.image_settings.file_format = "PNG"
+            _set_still_image_output(scene.render)
             with bpy.context.temp_override(**override):
                 result = bpy.ops.render.opengl(write_still=True, view_context=True)
             if result != {"FINISHED"}:
@@ -236,6 +382,51 @@ def capture_viewport(target_path):
                 "Viewport capture produced no image — make sure a 3D "
                 "Viewport is visible."
             )
+        shutil.move(produced[0], target_path)
+    finally:
+        shutil.rmtree(capture_dir, ignore_errors=True)
+
+    return target_path
+
+
+def _render_still_with_engine(scene, target_path, time_limit=None):
+    """Render the current frame with the scene's actual render engine and
+    write it to `target_path`.
+
+    The fallback for 'Rendered' viewport shading on an add-on engine, where
+    a viewport render would silently produce an unshaded frame (see
+    `_needs_full_render`). This is a real render, so it takes as long as one
+    and blocks Blender's UI while it runs — `bpy.ops.render.render` is called
+    with the default (blocking) execution context deliberately: an
+    INVOKE_DEFAULT render runs modally and would return before the file
+    exists.
+
+    Framing needs no viewport handling here — a real render always looks
+    through the scene camera, which is the same framing the viewport-render
+    path goes out of its way to reproduce.
+    """
+    if scene.camera is None:
+        raise BlenderSceneError(
+            f"The viewport is set to Rendered shading with the "
+            f"{scene.render.engine} engine, which has to be captured as a "
+            "real render, but the scene has no active camera. Set a camera, "
+            "or switch the viewport to Material Preview."
+        )
+
+    capture_dir = tempfile.mkdtemp(prefix="kitsu_render_")
+    try:
+        with _temporary_render_settings(scene), _temporary_cycles_time_limit(
+            scene, time_limit
+        ):
+            scene.render.filepath = os.path.join(capture_dir, "capture")
+            _set_still_image_output(scene.render)
+            result = bpy.ops.render.render(write_still=True)
+            if result != {"FINISHED"}:
+                raise BlenderSceneError("Render did not complete.")
+
+        produced = sorted(glob.glob(os.path.join(capture_dir, "capture*")))
+        if not produced:
+            raise BlenderSceneError("The render produced no image file.")
         shutil.move(produced[0], target_path)
     finally:
         shutil.rmtree(capture_dir, ignore_errors=True)
@@ -256,6 +447,9 @@ def capture_viewport_video(output_path, start_frame=None, end_frame=None):
     matching comment on `capture_viewport`) — keeps the viewport's own
     live shading while still framing exactly through the scene's actual
     camera.
+
+    'Rendered' shading on an add-on engine is refused outright rather than
+    captured or force-rendered (see below).
     """
     scene = bpy.context.scene
     output_dir = os.path.dirname(output_path) or "."
@@ -278,9 +472,26 @@ def capture_viewport_video(output_path, start_frame=None, end_frame=None):
     # not to reliably match what actually gets written — safer to render
     # somewhere private and pick up whatever's there afterward, exactly the
     # same reasoning already applied to the single-frame still capture.
+    space = override["area"].spaces.active
+    if _needs_full_render(scene, space):
+        # Deliberately NOT falling back to a full render the way the
+        # single-frame capture does: rendering a whole playback range with an
+        # add-on engine can take hours and would freeze Blender for all of
+        # it. Better to say so than to either hang or hand back a video of
+        # unshaded frames.
+        raise BlenderSceneError(
+            f"The viewport is set to Rendered shading with the "
+            f"{scene.render.engine} engine — Blender cannot capture that "
+            "from the viewport, so every frame would come out unshaded. "
+            "Switch the viewport to Material Preview to capture, or render "
+            "the sequence yourself and publish the file."
+        )
+
     capture_dir = tempfile.mkdtemp(prefix="kitsu_capture_video_")
     try:
-        with _temporary_render_settings(scene), _temporary_camera_view(region_3d):
+        with _temporary_render_settings(scene), _temporary_camera_view(
+            region_3d
+        ), _temporary_clean_viewport(space):
             scene.render.filepath = os.path.join(capture_dir, "capture")
             image_settings = scene.render.image_settings
             if hasattr(image_settings, "media_type"):
