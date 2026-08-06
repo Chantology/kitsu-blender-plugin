@@ -24,6 +24,7 @@ from . import (
     capture_naming,
     image_popup,
     kitsu_api,
+    panels,
     paths,
     properties,
     state,
@@ -273,6 +274,8 @@ class KITSU_OT_detect_task(bpy.types.Operator):
             state.runtime.task_context = ctx
             state.runtime.comments = comments
             state.runtime.selected_comment_index = -1
+            panels.sync_comment_items(bpy.context)
+            bpy.context.window_manager.kitsu.comment_active_index = -1
             state.runtime.time_logged_today_minutes = minutes
             _set_status("")
 
@@ -355,6 +358,8 @@ class KITSU_OT_apply_task_type_override(bpy.types.Operator):
             state.runtime.task_context = ctx
             state.runtime.comments = comments
             state.runtime.selected_comment_index = -1
+            panels.sync_comment_items(bpy.context)
+            bpy.context.window_manager.kitsu.comment_active_index = -1
             state.runtime.time_logged_today_minutes = minutes
             _set_status("")
 
@@ -472,6 +477,8 @@ def _comment_poll_tick():
             state.runtime.selected_comment_index = new_ids.index(selected_id)
         else:
             state.runtime.selected_comment_index = -1
+        panels.sync_comment_items(bpy.context)
+        bpy.context.window_manager.kitsu.comment_active_index = state.runtime.selected_comment_index
         async_utils.tag_redraw_all()
 
     def on_error(exc):
@@ -519,21 +526,6 @@ def _resolve_preview(comment_index, preview_index):
 def _is_video_preview(preview):
     extension = (preview.get("extension") or "").lower().lstrip(".")
     return extension in _VIDEO_EXTENSIONS
-
-
-class KITSU_OT_select_comment(bpy.types.Operator):
-    bl_idname = "kitsu.select_comment"
-    bl_label = "Select Comment"
-    bl_description = "Show this comment's checklist, revisions, and attachments"
-
-    index: bpy.props.IntProperty()
-
-    def execute(self, context):
-        if _resolve_comment(self.index) is None:
-            return {"CANCELLED"}
-        state.runtime.selected_comment_index = self.index
-        _ensure_comment_downloads(state.runtime.comments[self.index])
-        return {"FINISHED"}
 
 
 def _ensure_comment_downloads(comment):
@@ -873,7 +865,6 @@ class KITSU_OT_save_attachments(bpy.types.Operator):
 
 
 FEEDBACK_CLASSES = (
-    KITSU_OT_select_comment,
     KITSU_OT_toggle_checklist_item,
     KITSU_OT_view_preview,
     KITSU_OT_show_camera_background,

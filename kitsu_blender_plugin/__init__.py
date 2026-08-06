@@ -25,7 +25,11 @@ import bpy
 from . import async_utils, operators, panels, preferences, properties, state, thumbnails
 
 _CLASSES = (
-    (preferences.KitsuAddonPreferences, properties.KitsuSessionProperties)
+    (
+        preferences.KitsuAddonPreferences,
+        properties.KitsuCommentItem,
+        properties.KitsuSessionProperties,
+    )
     + operators.CONNECTION_TASK_CLASSES
     + operators.FEEDBACK_CLASSES
     + operators.PUBLISH_CLASSES

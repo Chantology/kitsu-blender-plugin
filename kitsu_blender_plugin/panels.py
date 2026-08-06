@@ -22,6 +22,13 @@ class KITSU_PT_base:
     bl_category = "Kitsu"
 
 
+# template_icon's scale is in UI-icon units (~16px per unit at ui_scale
+# 1.0), not pixels -- 5.0 approximates the other ports' 80px avatar/project
+# thumbnail. row.label(icon_value=...) draws at a single fixed icon-sized
+# slot, which is why both were much smaller than the other DCCs' ports.
+_THUMBNAIL_SCALE = 5.0
+
+
 def _draw_status(layout):
     if not state.runtime.status_message:
         return
@@ -71,13 +78,16 @@ class KITSU_PT_connection(KITSU_PT_base, bpy.types.Panel):
         _draw_status(layout)
 
         if state.runtime.is_logged_in() and state.runtime.current_user:
-            row = layout.row(align=True)
             icon_id = thumbnails.icon_id("user_avatar")
             if icon_id:
-                row.label(text="", icon_value=icon_id)
+                icon_row = layout.row()
+                icon_row.alignment = "CENTER"
+                icon_row.template_icon(icon_value=icon_id, scale=_THUMBNAIL_SCALE)
             user = state.runtime.current_user
             name = user.get("full_name") or user.get("email") or ""
-            row.label(text=f"Welcome, {name}")
+            name_row = layout.row()
+            name_row.alignment = "CENTER"
+            name_row.label(text=f"Welcome, {name}")
 
 
 class KITSU_PT_task(KITSU_PT_base, bpy.types.Panel):
@@ -93,11 +103,14 @@ class KITSU_PT_task(KITSU_PT_base, bpy.types.Panel):
         layout = self.layout
 
         if state.runtime.project:
-            row = layout.row(align=True)
             icon_id = thumbnails.icon_id("project_thumbnail")
             if icon_id:
-                row.label(text="", icon_value=icon_id)
-            row.label(text=state.runtime.project.get("name", ""))
+                icon_row = layout.row()
+                icon_row.alignment = "CENTER"
+                icon_row.template_icon(icon_value=icon_id, scale=_THUMBNAIL_SCALE)
+            name_row = layout.row()
+            name_row.alignment = "CENTER"
+            name_row.label(text=state.runtime.project.get("name", ""))
 
         layout.operator("kitsu.detect_task", icon="FILE_REFRESH")
 
@@ -202,6 +215,27 @@ def _format_comment_line(comment):
     return f"{prefix} - {person_name}: {text}" if prefix else f"{person_name}: {text}"
 
 
+def sync_comment_items(context):
+    """Rebuild wm.kitsu.comment_items from state.runtime.comments.
+
+    Call this any time state.runtime.comments is reassigned (task
+    (re)detection, the comment poll tick) so the template_list below stays
+    in sync with the actual data.
+    """
+    kitsu = context.window_manager.kitsu
+    kitsu.comment_items.clear()
+    for comment in state.runtime.comments:
+        item = kitsu.comment_items.add()
+        item.label = _format_comment_line(comment)
+
+
+class KITSU_UL_comments(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row()
+        row.alert = index == state.runtime.selected_comment_index
+        row.label(text=item.label)
+
+
 class KITSU_PT_feedback(KITSU_PT_base, bpy.types.Panel):
     bl_idname = "KITSU_PT_feedback"
     bl_label = "Feedback"
@@ -225,14 +259,18 @@ class KITSU_PT_feedback(KITSU_PT_base, bpy.types.Panel):
             layout.label(text="No comments yet.")
             return
 
-        col = layout.column(align=True)
-        selected = state.runtime.selected_comment_index
-        for index, comment in enumerate(comments):
-            row = col.row()
-            row.alert = index == selected
-            op = row.operator("kitsu.select_comment", text=_format_comment_line(comment))
-            op.index = index
+        kitsu = context.window_manager.kitsu
+        layout.template_list(
+            "KITSU_UL_comments",
+            "",
+            kitsu,
+            "comment_items",
+            kitsu,
+            "comment_active_index",
+            rows=10,
+        )
 
+        selected = state.runtime.selected_comment_index
         if not (0 <= selected < len(comments)):
             return
         comment = comments[selected]
@@ -294,7 +332,7 @@ class KITSU_PT_feedback(KITSU_PT_base, bpy.types.Panel):
             op.comment_index, op.preview_index = comment_index, preview_index
 
 
-FEEDBACK_CLASSES = (KITSU_PT_feedback,)
+FEEDBACK_CLASSES = (KITSU_UL_comments, KITSU_PT_feedback)
 
 
 class KITSU_PT_publish(KITSU_PT_base, bpy.types.Panel):

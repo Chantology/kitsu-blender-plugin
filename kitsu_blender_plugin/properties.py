@@ -78,6 +78,17 @@ def _on_timesheet_hours_update(self, context):
     state.runtime.timesheet_auto_advance = False
 
 
+def _on_comment_active_index_update(self, context):
+    from . import operators, state
+
+    comment = operators._resolve_comment(self.comment_active_index)
+    if comment is None:
+        state.runtime.selected_comment_index = -1
+        return
+    state.runtime.selected_comment_index = self.comment_active_index
+    operators._ensure_comment_downloads(comment)
+
+
 def set_timesheet_hours_programmatically(value):
     """Set wm.kitsu.timesheet_hours without treating it as a manual
     override (i.e. without pausing auto-advance) — used by the auto-advance
@@ -89,6 +100,18 @@ def set_timesheet_hours_programmatically(value):
         bpy.context.window_manager.kitsu.timesheet_hours = value
     finally:
         _suppress_timesheet_update = False
+
+
+class KitsuCommentItem(bpy.types.PropertyGroup):
+    """One row's display text for the Feedback panel's comment list.
+
+    Mirrors state.runtime.comments (a plain Python list of gazu dicts)
+    into a real bpy collection, since layout.template_list() -- the only
+    way to get a scrollbar on a list in Blender's UI toolkit -- needs an
+    actual CollectionProperty to bind to, not a Python list.
+    """
+
+    label: bpy.props.StringProperty()
 
 
 class KitsuSessionProperties(bpy.types.PropertyGroup):
@@ -115,6 +138,12 @@ class KitsuSessionProperties(bpy.types.PropertyGroup):
             "task-type folder corresponds to"
         ),
         items=_task_type_override_items,
+    )
+    comment_items: bpy.props.CollectionProperty(type=KitsuCommentItem)
+    comment_active_index: bpy.props.IntProperty(
+        name="Selected Comment",
+        default=-1,
+        update=_on_comment_active_index_update,
     )
     timesheet_hours: bpy.props.FloatProperty(
         name="Hours",
