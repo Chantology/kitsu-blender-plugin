@@ -99,7 +99,7 @@ def _find_view3d_context():
 
 
 @contextlib.contextmanager
-def _temporary_camera_view(region_3d):
+def _temporary_camera_view(region_3d, space=None):
     """Force `region_3d` into true Camera View (`view_perspective =
     'CAMERA'`, the same state Numpad-0 produces) for the duration of the
     block, restoring whatever it was set to afterward.
@@ -128,8 +128,21 @@ def _temporary_camera_view(region_3d):
     pressing Numpad-0 twice) — Blender keeps it in separate storage from
     the camera-locked state, so nothing about the user's own navigation
     is lost.
+
+    Skipped entirely when there is no camera to look through (e.g. a
+    modeling task's scene): Camera View without a camera makes Blender
+    build the view from the viewport's rotation and distance alone,
+    dropping its orbit pivot (`view_location`), so the capture comes out
+    centered on the world origin instead of what the artist framed.
+    Leaving the viewport's own free-look view in place is the right
+    framing there.
     """
-    if region_3d is None:
+    has_camera = bpy.context.scene.camera is not None or (
+        space is not None
+        and getattr(space, "use_local_camera", False)
+        and getattr(space, "camera", None) is not None
+    )
+    if region_3d is None or not has_camera:
         yield
         return
     previous = region_3d.view_perspective
@@ -367,7 +380,7 @@ def capture_viewport(target_path, render_time_limit=None):
     capture_dir = tempfile.mkdtemp(prefix="kitsu_capture_")
     try:
         with _temporary_render_settings(scene), _temporary_camera_view(
-            region_3d
+            region_3d, space
         ), _temporary_clean_viewport(space):
             scene.render.filepath = os.path.join(capture_dir, "capture")
             _set_still_image_output(scene.render)
@@ -490,7 +503,7 @@ def capture_viewport_video(output_path, start_frame=None, end_frame=None):
     capture_dir = tempfile.mkdtemp(prefix="kitsu_capture_video_")
     try:
         with _temporary_render_settings(scene), _temporary_camera_view(
-            region_3d
+            region_3d, space
         ), _temporary_clean_viewport(space):
             scene.render.filepath = os.path.join(capture_dir, "capture")
             image_settings = scene.render.image_settings
