@@ -73,7 +73,19 @@ class KITSU_PT_connection(KITSU_PT_base, bpy.types.Panel):
         col.prop(wm_props, "password")
         col.prop(prefs, "project_id")
         col.prop(prefs, "api_token")
-        layout.operator("kitsu.login", icon="URL")
+
+        # Only once the server has said this account needs a 2FA code.
+        if state.runtime.two_factor_methods:
+            box = layout.box()
+            box.label(text="Two-Factor Authentication", icon="LOCKED")
+            if len(state.runtime.two_factor_methods) > 1:
+                box.prop(wm_props, "two_factor_method")
+            box.prop(wm_props, "two_factor_code")
+            if wm_props.two_factor_method == "email_otp":
+                box.operator("kitsu.send_email_code", icon="FILE_REFRESH")
+            layout.operator("kitsu.login", text="Verify & Log In", icon="URL")
+        else:
+            layout.operator("kitsu.login", icon="URL")
 
         _draw_status(layout)
 

@@ -91,6 +91,18 @@ class KITSU_OT_login(bpy.types.Operator):
                 self.report({"ERROR"}, "Enter an email + password, or set an API token.")
             return {"CANCELLED"}
 
+        # Only sent once the server has asked for it (TwoFactorRequired below).
+        wm_props = context.window_manager.kitsu
+        two_factor_method = None
+        two_factor_code = None
+        if state.runtime.two_factor_methods and not use_token:
+            two_factor_method = wm_props.two_factor_method
+            two_factor_code = wm_props.two_factor_code.strip()
+            if not two_factor_code:
+                if not self.silent:
+                    self.report({"ERROR"}, "Enter your two-factor code.")
+                return {"CANCELLED"}
+
         _set_status("Logging in...")
         async_utils.tag_redraw_all()
 
@@ -99,7 +111,7 @@ class KITSU_OT_login(bpy.types.Operator):
             if use_token:
                 session.login_with_token(api_token)
             else:
-                session.login(email, password)
+                session.login(email, password, two_factor_method, two_factor_code)
             user = session.current_user()
             project = session.project(project_id)
             statuses = session.all_task_statuses(project)
@@ -111,6 +123,8 @@ class KITSU_OT_login(bpy.types.Operator):
             state.runtime.current_user = user
             state.runtime.project = project
             state.runtime.task_statuses = statuses
+            state.runtime.two_factor_methods = []
+            bpy.context.window_manager.kitsu.two_factor_code = ""
             _set_status(f"Welcome, {user.get('full_name') or user.get('email') or ''}")
 
             new_refresh_token = session.get_refresh_token()
@@ -123,6 +137,50 @@ class KITSU_OT_login(bpy.types.Operator):
 
         def on_error(exc):
             state.runtime.session = None
+            wm_props = bpy.context.window_manager.kitsu
+            if isinstance(exc, kitsu_api.TwoFactorRequired):
+                # Password was right — reveal the code field and ask again.
+                state.runtime.two_factor_methods = exc.methods
+                wm_props.two_factor_method = exc.preferred
+                wm_props.two_factor_code = ""
+                _set_status(str(exc))
+            elif isinstance(exc, kitsu_api.WrongTwoFactorCode):
+                wm_props.two_factor_code = ""
+                _set_status(str(exc), is_error=True)
+            else:
+                state.runtime.two_factor_methods = []
+                _set_status(str(exc), is_error=True)
+            async_utils.tag_redraw_all()
+
+        async_utils.run_async(work, on_done, on_error)
+        return {"FINISHED"}
+
+
+class KITSU_OT_send_email_code(bpy.types.Operator):
+    bl_idname = "kitsu.send_email_code"
+    bl_label = "Send Code"
+    bl_description = "Email a new two-factor code to this account"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        prefs = get_preferences(context)
+        server_url = prefs.server_url.strip()
+        email = prefs.email.strip()
+        if not (server_url and email):
+            self.report({"ERROR"}, "Enter the server URL and email first.")
+            return {"CANCELLED"}
+
+        _set_status("Sending code...")
+        async_utils.tag_redraw_all()
+
+        def work():
+            kitsu_api.KitsuSession(server_url).send_email_code(email)
+
+        def on_done(_result):
+            _set_status(kitsu_api.two_factor_prompt("email_otp"))
+            async_utils.tag_redraw_all()
+
+        def on_error(exc):
             _set_status(str(exc), is_error=True)
             async_utils.tag_redraw_all()
 
@@ -494,6 +552,7 @@ def _ensure_comment_poll_registered():
 
 CONNECTION_TASK_CLASSES = (
     KITSU_OT_login,
+    KITSU_OT_send_email_code,
     KITSU_OT_detect_task,
     KITSU_OT_apply_task_type_override,
     KITSU_OT_set_timesheet_hours,

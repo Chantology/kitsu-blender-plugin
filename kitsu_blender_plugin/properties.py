@@ -114,11 +114,61 @@ class KitsuCommentItem(bpy.types.PropertyGroup):
     label: bpy.props.StringProperty()
 
 
+_TWO_FACTOR_LABELS = {
+    "totp": ("Authenticator App", "Code from your authenticator app"),
+    "email_otp": ("Email Code", "Code emailed to you by Kitsu"),
+    "recovery_code": ("Recovery Code", "One of your Kitsu recovery codes"),
+}
+
+
+# Same GC-safety concern as _status_items_cache.
+_two_factor_method_items_cache = []
+
+
+def _two_factor_method_items(self, context):
+    from . import state
+
+    global _two_factor_method_items_cache
+    items = [
+        (method, *_TWO_FACTOR_LABELS.get(method, (method, method)))
+        for method in state.runtime.two_factor_methods
+    ]
+    if not items:
+        items = [("NONE", "None", "")]
+    _two_factor_method_items_cache = items
+    return items
+
+
+def _on_two_factor_method_changed(self, context):
+    from . import state
+
+    # Switching to email doesn't send anything by itself — the panel shows
+    # a Send Code button for that, so a stray click can't spam the inbox.
+    if self.two_factor_method == "email_otp":
+        state.runtime.status_message = "Click Send Code, then enter the emailed code and log in again."
+    else:
+        from . import kitsu_api
+
+        state.runtime.status_message = kitsu_api.two_factor_prompt(self.two_factor_method)
+    state.runtime.status_is_error = False
+
+
 class KitsuSessionProperties(bpy.types.PropertyGroup):
     password: bpy.props.StringProperty(
         name="Password",
         description="Kitsu account password (never saved to disk — cleared on every Blender restart)",
         subtype="PASSWORD",
+        default="",
+    )
+    two_factor_method: bpy.props.EnumProperty(
+        name="Method",
+        description="Which two-factor method to enter a code for",
+        items=_two_factor_method_items,
+        update=_on_two_factor_method_changed,
+    )
+    two_factor_code: bpy.props.StringProperty(
+        name="Code",
+        description="Two-factor authentication code (only asked for when your account has 2FA enabled)",
         default="",
     )
     comment: bpy.props.StringProperty(

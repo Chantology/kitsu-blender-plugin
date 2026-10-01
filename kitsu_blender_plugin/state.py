@@ -26,6 +26,11 @@ class RuntimeState:
         self.status_message = ""
         self.status_is_error = False
 
+        # Non-empty once the server has asked for a 2FA code (preferred
+        # method first; see kitsu_api.TwoFactorRequired) — the Connection
+        # panel only shows the code field while this is set.
+        self.two_factor_methods = []
+
         self.current_user = None  # dict, from KitsuSession.current_user()
         self.user_avatar_path = None
 

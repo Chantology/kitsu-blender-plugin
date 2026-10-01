@@ -21,6 +21,38 @@ class KitsuConnectionError(Exception):
     """A specific, user-facing reason a Kitsu/Zou call failed."""
 
 
+# 2FA methods a code can be typed in for. Zou also supports "fido"
+# (security keys), which needs a WebAuthn client this addon doesn't have —
+# deliberately left out until someone actually needs it.
+TWO_FACTOR_METHODS = ("totp", "email_otp", "recovery_code")
+
+
+class TwoFactorRequired(KitsuConnectionError):
+    """The email/password were accepted but the account has 2FA enabled —
+    log in again with a code for one of `methods` (a subset of
+    TWO_FACTOR_METHODS, `preferred` first). For "email_otp" the code has
+    already been emailed by the time this is raised."""
+
+    def __init__(self, message, methods, preferred):
+        super().__init__(message)
+        self.methods = methods
+        self.preferred = preferred
+
+
+class WrongTwoFactorCode(KitsuConnectionError):
+    """The 2FA code was rejected (wrong, expired or already used). The
+    methods from the preceding TwoFactorRequired still apply."""
+
+
+def two_factor_prompt(method):
+    """The status line asking for a code of the given 2FA method."""
+    return {
+        "totp": "Enter the code from your authenticator app, then log in again.",
+        "email_otp": "A code was sent to your email — enter it, then log in again.",
+        "recovery_code": "Enter one of your Kitsu recovery codes, then log in again.",
+    }.get(method, "Enter your two-factor code, then log in again.")
+
+
 def _import_gazu():
     try:
         from . import _vendor  # side effect: prioritizes vendor/ on sys.path
@@ -101,31 +133,86 @@ class KitsuSession:
         # useful at the *next* login, not within this one.
         self.client = self.gazu.client.create_client(self.host, use_refresh_token=True)
 
-    def login(self, email, password):
-        exceptions = self.gazu.exception
+    def login(self, email, password, two_factor_method=None, two_factor_code=None):
+        """Log in with email/password, plus a 2FA code once the server has
+        asked for one (see TwoFactorRequired).
+
+        Posts to auth/login directly instead of via `gazu.log_in`: gazu
+        turns Zou's 400 into an exception that keeps only the message text,
+        dropping the `missing_OTP` / `wrong_OTP` flags and the list of the
+        account's 2FA methods that decide whether a code field is needed at
+        all. Same reasoning as update_comment_checklist below.
+        """
+        payload = {"email": email, "password": password}
+        if two_factor_method and two_factor_code:
+            payload[two_factor_method] = two_factor_code.strip()
+
+        path = "auth/login"
+        url = self.gazu.client.get_full_url(path, client=self.client)
         try:
-            self.gazu.log_in(email, password, client=self.client)
-        except exceptions.AuthFailedException as exc:
+            response = self.client.session.post(url, json=payload)
+        except Exception as exc:
+            raise KitsuConnectionError(f"Could not reach {self.host}: {exc}") from exc
+
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            body = {}
+        status = response.status_code
+
+        if 200 <= status < 300 and body.get("login") is not False and body.get("access_token"):
+            self.gazu.client.set_tokens(body, client=self.client)
+            return
+
+        if body.get("missing_OTP"):
+            enabled = body.get("two_factor_authentication_enabled") or []
+            methods = [m for m in TWO_FACTOR_METHODS if m in enabled]
+            if not methods:
+                raise KitsuConnectionError(
+                    "This account's two-factor method isn't supported here. "
+                    "Enable an authenticator app or email codes in Kitsu."
+                )
+            preferred = body.get("preferred_two_factor_authentication")
+            if preferred not in methods:
+                # e.g. a security-key-only account: only a recovery code is left.
+                preferred = methods[0]
+            if preferred == "email_otp":
+                self.send_email_code(email)
+            raise TwoFactorRequired(two_factor_prompt(preferred), methods, preferred)
+
+        if body.get("wrong_OTP"):
+            raise WrongTwoFactorCode("That code was wrong or has expired — try again.")
+
+        if status == 404:
             raise KitsuConnectionError(
-                f"{self.host} rejected the login — check the email/password."
-            ) from exc
-        except exceptions.RouteNotFoundException as exc:
-            raise KitsuConnectionError(
-                f"{self.host} has no route at '{exc}' (404). The server URL "
+                f"{self.host} has no route at '{path}' (404). The server URL "
                 "is likely wrong for the API — the Zou API may live at a "
                 "different host or path than the Kitsu web UI. Ask whoever "
                 "manages the server for the correct API URL."
-            ) from exc
-        except exceptions.NotAllowedException as exc:
+            )
+        if status == 403:
             raise KitsuConnectionError(
-                f"{self.host} refused the request (403): {exc}"
-            ) from exc
-        except exceptions.ServerErrorException as exc:
+                f"{self.host} refused the request (403): {body.get('message') or path}"
+            )
+        if status >= 500:
             raise KitsuConnectionError(
-                f"{self.host} returned a server error: {exc}"
-            ) from exc
+                f"{self.host} returned a server error (HTTP {status}): "
+                f"{body.get('message') or response.text[:200]}"
+            )
+        raise KitsuConnectionError(
+            f"{self.host} rejected the login — check the email/password."
+        )
+
+    def send_email_code(self, email):
+        """Have Kitsu email a fresh 2FA code (for "Resend code")."""
+        try:
+            self.gazu.send_email_otp(email, client=self.client)
         except Exception as exc:
-            raise KitsuConnectionError(f"Could not reach {self.host}: {exc}") from exc
+            raise KitsuConnectionError(
+                f"Could not ask {self.host} to email a code: {exc}"
+            ) from exc
 
     def login_with_token(self, refresh_token):
         """Authenticate using a refresh token saved from a previous
