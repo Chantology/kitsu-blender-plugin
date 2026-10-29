@@ -36,6 +36,9 @@ from . import (
 from .preferences import get_preferences
 
 _VIDEO_EXTENSIONS = {"mp4", "mov", "webm", "avi", "mkv"}
+# What "+ From File..." accepts as a revision's main preview (see
+# KITSU_OT_add_variation_from_file), same as the Nuke port.
+_PUBLISH_VIDEO_EXTENSIONS = (".mp4", ".mov")
 
 
 def _today_str():
@@ -123,6 +126,10 @@ class KITSU_OT_login(bpy.types.Operator):
             state.runtime.current_user = user
             state.runtime.project = project
             state.runtime.task_statuses = statuses
+            # Possibly a different project now -- the picker's task types
+            # must be reloaded for it (the ShotTree is already keyed by
+            # project id, see _cached_shot_tree).
+            state.runtime.task_type_options = []
             state.runtime.two_factor_methods = []
             bpy.context.window_manager.kitsu.two_factor_code = ""
             _set_status(f"Welcome, {user.get('full_name') or user.get('email') or ''}")
@@ -260,6 +267,143 @@ def _now():
     return time.time()
 
 
+def _apply_resolved_task(task, breadcrumb, ctx, minutes, comments, manual=False):
+    """Finish populating the Task section for a resolved task, whether it
+    came straight out of folder detection or via the task picker (a
+    remembered choice, or one just made by hand). Main thread only (an
+    on_done callback)."""
+    state.runtime.task_picker_visible = False
+    previous_task = state.runtime.task
+    same_task = previous_task is not None and previous_task.get("id") == task.get("id")
+
+    state.runtime.task = task
+    state.runtime.task_breadcrumb = breadcrumb
+    state.runtime.task_context = ctx
+    state.runtime.task_manual = manual
+    state.runtime.comments = comments
+    state.runtime.selected_comment_index = -1
+    panels.sync_comment_items(bpy.context)
+    bpy.context.window_manager.kitsu.comment_active_index = -1
+    state.runtime.time_logged_today_minutes = minutes
+    _set_status("")
+
+    if not same_task:
+        _restart_timesheet_tracker(minutes)
+    # Re-detecting the same task leaves the tracker exactly as it was
+    # (running or paused) — it must not reset just because the user
+    # clicked Detect Task again to refresh comments.
+
+    _ensure_timesheet_timer_registered()
+    _ensure_comment_poll_registered()
+    async_utils.tag_redraw_all()
+
+
+def _clear_task():
+    state.runtime.task = None
+    state.runtime.task_breadcrumb = []
+    state.runtime.task_context = None
+    state.runtime.task_manual = False
+
+
+# ---- task picker (manual episode / sequence / shot / task type) ----
+
+
+def _store_shot_tree(tree):
+    state.runtime.shot_tree = tree
+    state.runtime.shot_tree_project_id = (state.runtime.project or {}).get("id")
+
+
+def _cached_shot_tree():
+    """The loaded ShotTree, or None if there isn't one for the current
+    project yet (e.g. after switching projects)."""
+    project_id = (state.runtime.project or {}).get("id")
+    if project_id and state.runtime.shot_tree_project_id == project_id:
+        return state.runtime.shot_tree
+    return None
+
+
+def _set_picker_enum(wm_props, name, value):
+    """Select `value` in one of the picker's dynamic-enum dropdowns, or its
+    "nothing picked" entry if `value` is None or (no longer) one of its
+    items — assigning an identifier Blender doesn't know raises."""
+    try:
+        setattr(wm_props, name, value or properties.PICKER_NONE)
+    except (TypeError, ValueError):
+        setattr(wm_props, name, properties.PICKER_NONE)
+
+
+def _prefill_task_picker():
+    """Preselect the current shot / task type in the picker's dropdowns.
+    Top-down, since each dropdown's update callback empties the ones
+    below it (see properties._on_picker_episode_update)."""
+    wm_props = bpy.context.window_manager.kitsu
+    tree = _cached_shot_tree()
+    shot = None
+    episode = sequence = None
+    if state.runtime.picker_context == "shot" and state.runtime.picker_entity and tree:
+        entity = state.runtime.picker_entity
+        # The tree's own copy carries parent_id, whatever lookup the
+        # entity itself came from.
+        shot = tree.find_shot(entity.get("id")) or entity
+        episode, sequence = tree.parents(shot)
+
+    _set_picker_enum(wm_props, "picker_episode", episode and episode.get("id"))
+    _set_picker_enum(wm_props, "picker_sequence", sequence and sequence.get("id"))
+    _set_picker_enum(wm_props, "picker_shot", shot and shot.get("id"))
+
+    task = state.runtime.task
+    task_type_id = task.get("task_type_id") if task else None
+    if not any(t.get("id") == task_type_id for t in state.runtime.task_type_options):
+        task_type_id = None
+    _set_picker_enum(wm_props, "picker_task_type", task_type_id)
+
+    state.runtime.picker_prefill_shot_id = shot.get("id") if shot else None
+    state.runtime.picker_prefill_task_type_id = task_type_id
+
+
+def _open_task_picker(hint):
+    """Show the task picker, first loading (in the background) whatever it
+    still needs: the project's ShotTree for a shot-context file, and the
+    project's task types."""
+    session = state.runtime.session
+    project = state.runtime.project
+    need_tree = state.runtime.picker_context == "shot" and _cached_shot_tree() is None
+    need_task_types = not state.runtime.task_type_options
+
+    if not (need_tree or need_task_types):
+        _prefill_task_picker()
+        state.runtime.task_picker_hint = hint
+        state.runtime.task_picker_visible = True
+        async_utils.tag_redraw_all()
+        return
+
+    state.runtime.task_picker_hint = "Loading shots…" if need_tree else "Loading task types…"
+    state.runtime.task_picker_visible = True
+    async_utils.tag_redraw_all()
+
+    def work():
+        tree = task_detection.ShotTree.load(session, project) if need_tree else None
+        task_types = session.all_task_types_for_project(project) if need_task_types else None
+        return tree, task_types
+
+    def on_done(result):
+        tree, task_types = result
+        if tree is not None:
+            _store_shot_tree(tree)
+        if task_types is not None:
+            state.runtime.task_type_options = task_types or []
+        if not state.runtime.task_picker_visible:
+            return  # hidden again (Change Task clicked twice) while loading
+        _open_task_picker(hint)
+
+    def on_error(exc):
+        state.runtime.task_picker_visible = False
+        _set_status(f"Could not load the project's shots: {exc}", is_error=True)
+        async_utils.tag_redraw_all()
+
+    async_utils.run_async(work, on_done, on_error)
+
+
 class KITSU_OT_detect_task(bpy.types.Operator):
     bl_idname = "kitsu.detect_task"
     bl_label = "Detect Task"
@@ -275,84 +419,57 @@ class KITSU_OT_detect_task(bpy.types.Operator):
         scene_path = blender_scene.scene_path()
         person_id = (state.runtime.current_user or {}).get("id")
         # Read now (main thread) -- work() below runs in a background
-        # thread and must never touch bpy itself.
+        # thread and must never touch bpy itself. Remembered manual picks
+        # win over the folders (see task_detection.detect_with_overrides).
+        remembered_shot_id = blender_scene.load_shot_override()
         remembered_task_type_id = blender_scene.load_task_type_override()
-
-        def _finish(task, breadcrumb, ctx):
-            minutes = session.get_time_spent_today(task, _today_str(), person_id)
-            comments = session.all_comments_for_task(task)
-            return ("resolved", task, breadcrumb, ctx, minutes, comments)
+        state.runtime.task_picker_visible = False
 
         def work():
-            try:
-                task, breadcrumb, ctx = task_detection.detect_task(session, project, scene_path)
-            except task_detection.TaskTypeMismatch as exc:
-                if remembered_task_type_id:
-                    task_type = next(
-                        (
-                            t
-                            for t in session.all_task_types_for_project(project)
-                            if t.get("id") == remembered_task_type_id
-                        ),
-                        None,
-                    )
-                    if task_type:
-                        task = session.get_task_by_entity(exc.entity, task_type)
-                        if task:
-                            breadcrumb = exc.breadcrumb + [task_type.get("name", "?")]
-                            return _finish(task, breadcrumb, exc.context)
-                # No remembered override (or it no longer resolves to a real
-                # task) -- fetch the project's task types here, in the same
-                # background call, so the panel can offer a picker without
-                # another round-trip.
-                task_types = session.all_task_types_for_project(project)
-                return ("mismatch", exc, task_types)
-            return _finish(task, breadcrumb, ctx)
+            outcome = task_detection.detect_with_overrides(
+                session, project, scene_path, remembered_shot_id, remembered_task_type_id
+            )
+            if outcome["result"] is None:
+                # Unresolved -- fetch the project's task types here, in the
+                # same background call, so the panel can offer the picker
+                # without another round-trip.
+                return outcome, session.all_task_types_for_project(project), None, None
+            task = outcome["result"][0]
+            minutes = session.get_time_spent_today(task, _today_str(), person_id)
+            comments = session.all_comments_for_task(task)
+            return outcome, None, minutes, comments
 
         def on_done(payload):
-            if payload[0] == "mismatch":
-                _, exc, task_types = payload
-                state.runtime.task = None
-                state.runtime.task_breadcrumb = []
-                state.runtime.task_context = None
-                state.runtime.task_type_mismatch = exc
-                state.runtime.task_type_options = task_types
-                _set_status(str(exc), is_error=True)
-                async_utils.tag_redraw_all()
+            outcome, task_types, minutes, comments = payload
+            state.runtime.picker_entity = outcome["entity"]
+            state.runtime.picker_breadcrumb = outcome["breadcrumb"]
+            state.runtime.picker_context = outcome["context"]
+            state.runtime.folder_task_type_name = outcome["task_type_name"]
+            if outcome["shot_tree"] is not None:
+                _store_shot_tree(outcome["shot_tree"])
+
+            if outcome["result"] is not None:
+                task, breadcrumb, ctx = outcome["result"]
+                _apply_resolved_task(task, breadcrumb, ctx, minutes, comments, manual=outcome["manual"])
                 return
 
-            _, task, breadcrumb, ctx, minutes, comments = payload
-            state.runtime.task_type_mismatch = None
-            state.runtime.task_type_options = []
-            previous_task = state.runtime.task
-            same_task = previous_task is not None and previous_task.get("id") == task.get("id")
-
-            state.runtime.task = task
-            state.runtime.task_breadcrumb = breadcrumb
-            state.runtime.task_context = ctx
-            state.runtime.comments = comments
-            state.runtime.selected_comment_index = -1
-            panels.sync_comment_items(bpy.context)
-            bpy.context.window_manager.kitsu.comment_active_index = -1
-            state.runtime.time_logged_today_minutes = minutes
-            _set_status("")
-
-            if not same_task:
-                _restart_timesheet_tracker(minutes)
-            # Re-detecting the same task leaves the tracker exactly as it
-            # was (running or paused) — it must not reset just because the
-            # user clicked Detect Task again to refresh comments.
-
-            _ensure_timesheet_timer_registered()
-            _ensure_comment_poll_registered()
-            async_utils.tag_redraw_all()
+            state.runtime.task_type_options = task_types or []
+            _clear_task()
+            _set_status(outcome["error"] or "No task detected.", is_error=True)
+            if outcome["entity"] is None:
+                hint = "Pick the shot this file belongs to:"
+            else:
+                hint = "Pick the task type:"
+            _open_task_picker(hint)
 
         def on_error(exc):
-            state.runtime.task = None
-            state.runtime.task_breadcrumb = []
-            state.runtime.task_context = None
-            state.runtime.task_type_mismatch = None
-            state.runtime.task_type_options = []
+            # TaskDetectionError (e.g. an asset that can't be found, or an
+            # unsaved file) -- nothing for the picker to apply to.
+            _clear_task()
+            state.runtime.picker_entity = None
+            state.runtime.picker_breadcrumb = None
+            state.runtime.picker_context = None
+            state.runtime.task_picker_visible = False
             _set_status(str(exc), is_error=True)
             async_utils.tag_redraw_all()
 
@@ -360,80 +477,171 @@ class KITSU_OT_detect_task(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class KITSU_OT_apply_task_type_override(bpy.types.Operator):
-    bl_idname = "kitsu.apply_task_type_override"
-    bl_label = "Use Selected Task Type"
+class KITSU_OT_change_task(bpy.types.Operator):
+    bl_idname = "kitsu.change_task"
+    bl_label = "Change Task..."
     bl_description = (
-        "Manually assign this file to the selected task type, and remember "
+        "Pick the shot and/or task type by hand. The choice is remembered "
+        "for this file and wins over folder detection until reset"
+    )
+
+    def execute(self, context):
+        if state.runtime.task_picker_visible:
+            state.runtime.task_picker_visible = False
+            async_utils.tag_redraw_all()
+            return {"FINISHED"}
+        if not state.runtime.is_logged_in():
+            self.report({"ERROR"}, "Log in first.")
+            return {"CANCELLED"}
+        if state.runtime.picker_context is None:
+            self.report(
+                {"INFO"},
+                "Click Detect Task first. The task can only be changed by hand "
+                "for a file in a shot folder, or an asset that was found.",
+            )
+            return {"CANCELLED"}
+        _open_task_picker("Pick a different shot and/or task type:")
+        return {"FINISHED"}
+
+
+class KITSU_OT_apply_task_pick(bpy.types.Operator):
+    bl_idname = "kitsu.apply_task_pick"
+    bl_label = "Use Selected"
+    bl_description = (
+        "Assign this file to the selected shot / task type, and remember "
         "the choice for this file"
     )
 
     def execute(self, context):
-        mismatch = state.runtime.task_type_mismatch
-        if mismatch is None:
+        if not state.runtime.is_logged_in():
+            self.report({"ERROR"}, "Log in first.")
+            return {"CANCELLED"}
+        if state.runtime.picker_context is None:
             return {"CANCELLED"}
 
-        chosen_id = context.window_manager.kitsu.task_type_override_choice
+        wm_props = context.window_manager.kitsu
+        entity = state.runtime.picker_entity
+        breadcrumb = state.runtime.picker_breadcrumb
+        ctx = state.runtime.picker_context
+
+        shot_changed = False
+        if ctx == "shot":
+            tree = _cached_shot_tree()
+            shot = tree.find_shot(wm_props.picker_shot) if tree else None
+            if shot is None:
+                self.report({"ERROR"}, "Pick a shot first.")
+                return {"CANCELLED"}
+            if shot.get("id") != state.runtime.picker_prefill_shot_id:
+                shot_changed = True
+                entity = shot
+                breadcrumb = tree.breadcrumb(shot)
+                state.runtime.picker_entity = entity
+                state.runtime.picker_breadcrumb = breadcrumb
+                state.runtime.picker_prefill_shot_id = shot.get("id")
+                # Remembered right away, like the Nuke port's shot combo --
+                # even if that shot turns out to have no task of the
+                # folder's type, it's still the right shot.
+                blender_scene.save_shot_override(shot.get("id"))
+        if entity is None:
+            self.report({"ERROR"}, "Pick a shot first.")
+            return {"CANCELLED"}
+
+        picked_id = wm_props.picker_task_type
         task_type = next(
-            (t for t in state.runtime.task_type_options if t.get("id") == chosen_id),
+            (t for t in state.runtime.task_type_options if t.get("id") == picked_id),
             None,
         )
-        if task_type is None:
-            self.report({"ERROR"}, "Pick a task type first.")
-            return {"CANCELLED"}
+        task_type_changed = (
+            task_type is not None
+            and task_type.get("id") != state.runtime.picker_prefill_task_type_id
+        )
+        if not (shot_changed or task_type_changed):
+            if state.runtime.task is not None:
+                state.runtime.task_picker_visible = False  # nothing changed
+                return {"FINISHED"}
+            if task_type is None:
+                self.report({"ERROR"}, "Pick a task type first.")
+                return {"CANCELLED"}
 
         session = state.runtime.session
+        project = state.runtime.project
         person_id = (state.runtime.current_user or {}).get("id")
-        entity = mismatch.entity
-        breadcrumb = mismatch.breadcrumb + [task_type.get("name", "?")]
-        ctx = mismatch.context
+        remembered_task_type_id = blender_scene.load_task_type_override()
+        folder_task_type_name = state.runtime.folder_task_type_name
 
         def work():
-            task = session.get_task_by_entity(entity, task_type)
-            if task is None:
-                raise task_detection.TaskDetectionError(
-                    f"{task_type.get('name', '?')!r} is a valid task type, "
-                    "but this entity doesn't have a task of that type yet "
-                    "in Kitsu."
+            # Task type: the one picked in the dropdown, else the
+            # remembered pick, else the folder name.
+            result = None
+            if task_type is not None:
+                result = task_detection.resolve_task_by_type_id(
+                    session, project, entity, breadcrumb, ctx, task_type.get("id")
                 )
+                if result is None and task_type_changed:
+                    return ("no_task_of_type", task_type.get("name", "?"))
+            if result is None and remembered_task_type_id:
+                result = task_detection.resolve_task_by_type_id(
+                    session, project, entity, breadcrumb, ctx, remembered_task_type_id
+                )
+            if result is None:
+                try:
+                    result = task_detection.resolve_task(
+                        session, project, entity, breadcrumb, folder_task_type_name, ctx
+                    )
+                except task_detection.TaskTypeMismatch:
+                    return ("no_task", None)
+            task = result[0]
             minutes = session.get_time_spent_today(task, _today_str(), person_id)
             comments = session.all_comments_for_task(task)
-            return task, minutes, comments
+            return ("resolved", result, minutes, comments)
 
-        def on_done(result):
-            task, minutes, comments = result
-            # Fresh bpy.context, not the execute()-scoped one above -- see
-            # the module docstring on why callbacks never close over it.
-            blender_scene.save_task_type_override(task_type.get("id"))
+        def on_done(payload):
+            kind = payload[0]
+            if kind == "no_task_of_type":
+                _set_status(
+                    f"'{payload[1]}' is a valid task type, but this entity "
+                    "doesn't have a task of that type yet in Kitsu.",
+                    is_error=True,
+                )
+                async_utils.tag_redraw_all()
+                return
+            if kind == "no_task":
+                _clear_task()
+                _set_status(
+                    " / ".join(breadcrumb) + " — no matching task, pick the task type:",
+                    is_error=True,
+                )
+                state.runtime.task_picker_hint = "Pick the task type:"
+                async_utils.tag_redraw_all()
+                return
 
-            state.runtime.task_type_mismatch = None
-            state.runtime.task_type_options = []
-            previous_task = state.runtime.task
-            same_task = previous_task is not None and previous_task.get("id") == task.get("id")
-
-            state.runtime.task = task
-            state.runtime.task_breadcrumb = breadcrumb
-            state.runtime.task_context = ctx
-            state.runtime.comments = comments
-            state.runtime.selected_comment_index = -1
-            panels.sync_comment_items(bpy.context)
-            bpy.context.window_manager.kitsu.comment_active_index = -1
-            state.runtime.time_logged_today_minutes = minutes
-            _set_status("")
-
-            if not same_task:
-                _restart_timesheet_tracker(minutes)
-
-            _ensure_timesheet_timer_registered()
-            _ensure_comment_poll_registered()
-            async_utils.tag_redraw_all()
+            _, (task, task_breadcrumb, task_ctx), minutes, comments = payload
+            # blender_scene uses a fresh bpy.context, not the
+            # execute()-scoped one above -- see the module docstring on
+            # why callbacks never close over it.
+            if task_type_changed:
+                blender_scene.save_task_type_override(task_type.get("id"))
+            _apply_resolved_task(task, task_breadcrumb, task_ctx, minutes, comments, manual=True)
 
         def on_error(exc):
-            _set_status(str(exc), is_error=True)
+            _set_status(f"Unexpected error resolving task: {exc}", is_error=True)
             async_utils.tag_redraw_all()
 
         async_utils.run_async(work, on_done, on_error)
         return {"FINISHED"}
+
+
+class KITSU_OT_reset_task_overrides(bpy.types.Operator):
+    bl_idname = "kitsu.reset_task_overrides"
+    bl_label = "Reset to Folder Detection"
+    bl_description = (
+        "Forget the shot/task type picked by hand for this file and detect "
+        "it from its folders again"
+    )
+
+    def execute(self, context):
+        blender_scene.clear_overrides()
+        return bpy.ops.kitsu.detect_task("EXEC_DEFAULT")
 
 
 class KITSU_OT_set_timesheet_hours(bpy.types.Operator):
@@ -554,7 +762,9 @@ CONNECTION_TASK_CLASSES = (
     KITSU_OT_login,
     KITSU_OT_send_email_code,
     KITSU_OT_detect_task,
-    KITSU_OT_apply_task_type_override,
+    KITSU_OT_change_task,
+    KITSU_OT_apply_task_pick,
+    KITSU_OT_reset_task_overrides,
     KITSU_OT_set_timesheet_hours,
     KITSU_OT_log_time,
 )
@@ -946,9 +1156,9 @@ class KITSU_OT_publish(bpy.types.Operator):
     bl_idname = "kitsu.publish"
     bl_label = "Publish"
     bl_description = (
-        "Post the status change and comment. If any image(s) are queued "
-        "below, publishes them as a new revision (first = main preview, "
-        "rest = variations); otherwise posts the status/comment alone, "
+        "Post the status change and comment. If any image(s)/video(s) are "
+        "queued below, publishes them as a new revision (first = main "
+        "preview, rest = variations); otherwise posts the status/comment alone, "
         "with no preview — the viewport is never captured automatically"
     )
 
@@ -1055,10 +1265,15 @@ class KITSU_OT_add_variation_from_viewport(bpy.types.Operator):
 class KITSU_OT_add_variation_from_file(bpy.types.Operator):
     bl_idname = "kitsu.add_variation_from_file"
     bl_label = "+ From File..."
-    bl_description = "Queue an existing image file as an image to publish"
+    bl_description = (
+        "Queue an existing image or video (e.g. an MP4 rendered on the "
+        "farm) to publish as a revision"
+    )
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
-    filter_glob: bpy.props.StringProperty(default="*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff", options={"HIDDEN"})
+    filter_glob: bpy.props.StringProperty(
+        default="*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.mp4;*.mov", options={"HIDDEN"}
+    )
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -1068,7 +1283,13 @@ class KITSU_OT_add_variation_from_file(bpy.types.Operator):
         if not self.filepath or not os.path.isfile(self.filepath):
             self.report({"ERROR"}, "File not found.")
             return {"CANCELLED"}
-        state.runtime.publish_variations.append(self.filepath)
+        if self.filepath.lower().endswith(_PUBLISH_VIDEO_EXTENSIONS):
+            # A video (typically the farm-rendered MP4) is the deliverable,
+            # so it becomes the main preview of the new revision rather
+            # than a variation hanging off a viewport snapshot.
+            state.runtime.publish_variations.insert(0, self.filepath)
+        else:
+            state.runtime.publish_variations.append(self.filepath)
         return {"FINISHED"}
 
 

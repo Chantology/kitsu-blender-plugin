@@ -40,15 +40,32 @@ class RuntimeState:
         self.task = None  # dict, from task_detection.detect_task()
         self.task_breadcrumb = []
         self.task_context = None  # "asset" | "shot" | None
+        self.task_manual = False  # True when a remembered/hand-made pick (not the folders) resolved `task`
         self.task_statuses = []  # list of dicts, populated after login
 
-        # Set instead of `task` when detection resolved the asset/shot but
-        # not its task-type folder name (task_detection.TaskTypeMismatch) --
-        # the panel shows a manual task-type picker instead of "No task
-        # detected." while this is set. `task_type_options` is the project's
-        # task types, fetched alongside the mismatch so the dropdown has
-        # something to show without another round-trip.
-        self.task_type_mismatch = None
+        # The task picker (Episode -> Sequence -> Shot -> Task Type), shown
+        # instead of just "No task detected." when detection can't resolve
+        # the task (task_detection.ShotNotFound / TaskTypeMismatch), or any
+        # time via Change Task. What it applies to: the asset/shot found by
+        # detection or picked by hand, its names, and "asset"/"shot"
+        # (picker_context stays None until a detection got that far).
+        self.picker_entity = None
+        self.picker_breadcrumb = None
+        self.picker_context = None
+        self.folder_task_type_name = None  # task-type folder name, for resolving a hand-picked shot
+        self.task_picker_visible = False
+        self.task_picker_hint = ""
+        # Ids the picker's dropdowns were prefilled with, so "Use Selected"
+        # only remembers a shot/task type the user actually changed (the
+        # Nuke port's combo-changed signals give it that for free).
+        self.picker_prefill_shot_id = None
+        self.picker_prefill_task_type_id = None
+        # task_detection.ShotTree for the picker, loaded lazily (bulk
+        # requests) and reused while the project stays the same. Also the
+        # source of the picker's dynamic enum items -- see properties.py.
+        self.shot_tree = None
+        self.shot_tree_project_id = None
+        # The project's task types, for the picker's Task Type dropdown.
         self.task_type_options = []
 
         self.time_logged_today_minutes = 0

@@ -5,7 +5,7 @@ Python singleton, since it holds gazu dicts and a live session object that
 bpy's property system can't represent. This PropertyGroup only holds the
 few user-editable fields an actual widget needs a real bpy property for:
 the publish comment text, the chosen status, the timesheet hours slider,
-and the login password. It is registered on `WindowManager` (`wm.kitsu`)
+the task picker's dropdowns, and the login password. It is registered on `WindowManager` (`wm.kitsu`)
 rather than `Scene`, since none of this is scene/file data — it should not
 be saved into a .blend and should behave the same regardless of which
 file is open.
@@ -28,10 +28,16 @@ import bpy
 # the last result in a module-level variable is the documented workaround.
 _status_items_cache = []
 
-# Same GC-safety concern as _status_items_cache, kept as a separate cache
-# since these two enums are populated independently and can be visible at
-# different times.
-_task_type_override_items_cache = []
+# Same GC-safety concern as _status_items_cache, for the task picker's four
+# dropdowns (episode/sequence/shot/task type), keyed by dropdown -- each is
+# populated independently, and the sequence/shot ones change with the
+# dropdown above them.
+_picker_items_cache = {}
+
+# Identifier of every picker dropdown's "nothing picked" first entry. It's
+# always present, so resetting a dropdown to it is always valid whatever
+# the dropdown above it currently holds.
+PICKER_NONE = "NONE"
 
 # Set while a periodic/programmatic update (the auto-advance timer, or
 # restarting the tracker for a newly-detected task) is writing
@@ -56,18 +62,69 @@ def _status_items(self, context):
     return _status_items_cache
 
 
-def _task_type_override_items(self, context):
+def _picker_items(key, placeholder, entities):
+    items = [(PICKER_NONE, placeholder, placeholder)]
+    for entity in entities:
+        name = entity.get("name") or "?"
+        items.append((entity["id"], name, name))
+    # Hand back the very same cached list when nothing changed, so the
+    # strings Blender may still be holding from the previous call stay
+    # referenced (reading one dropdown's value from another's callback, as
+    # the sequence/shot ones below do, re-runs that dropdown's callback).
+    if _picker_items_cache.get(key) == items:
+        return _picker_items_cache[key]
+    _picker_items_cache[key] = items
+    return items
+
+
+def _picker_episode_items(self, context):
     from . import state
 
-    global _task_type_override_items_cache
-    items = [
-        (task_type["id"], task_type["name"], task_type["name"])
-        for task_type in state.runtime.task_type_options
-    ]
-    if not items:
-        items = [("NONE", "No task types", "No task types loaded yet")]
-    _task_type_override_items_cache = items
-    return _task_type_override_items_cache
+    tree = state.runtime.shot_tree
+    return _picker_items("episode", "Select episode…", tree.episodes() if tree else [])
+
+
+def _picker_sequence_items(self, context):
+    from . import state
+
+    tree = state.runtime.shot_tree
+    if tree is None:
+        sequences = []
+    elif tree.episodic:
+        episode_id = self.picker_episode
+        sequences = tree.sequences(episode_id) if episode_id not in ("", PICKER_NONE) else []
+    else:
+        sequences = tree.sequences()
+    return _picker_items("sequence", "Select sequence…", sequences)
+
+
+def _picker_shot_items(self, context):
+    from . import state
+
+    tree = state.runtime.shot_tree
+    sequence_id = self.picker_sequence
+    shots = tree.shots(sequence_id) if tree and sequence_id not in ("", PICKER_NONE) else []
+    return _picker_items("shot", "Select shot…", shots)
+
+
+def _picker_task_type_items(self, context):
+    from . import state
+
+    return _picker_items("task_type", "Select task type…", state.runtime.task_type_options)
+
+
+# Cascade: picking a different episode empties the sequence and shot
+# dropdowns below it, a different sequence the shot one -- the same as the
+# Nuke port's combos. Nothing is applied until "Use Selected" (see
+# operators.KITSU_OT_apply_task_pick), consistent with the explicit button
+# the old task-type-only picker had, and immune to enum updates firing
+# while the picker is being prefilled.
+def _on_picker_episode_update(self, context):
+    self.picker_sequence = PICKER_NONE
+
+
+def _on_picker_sequence_update(self, context):
+    self.picker_shot = PICKER_NONE
 
 
 def _on_timesheet_hours_update(self, context):
@@ -181,13 +238,27 @@ class KitsuSessionProperties(bpy.types.PropertyGroup):
         description="Task status to set when publishing",
         items=_status_items,
     )
-    task_type_override_choice: bpy.props.EnumProperty(
+    picker_episode: bpy.props.EnumProperty(
+        name="Episode",
+        description="Episode of the shot this file belongs to",
+        items=_picker_episode_items,
+        update=_on_picker_episode_update,
+    )
+    picker_sequence: bpy.props.EnumProperty(
+        name="Sequence",
+        description="Sequence of the shot this file belongs to",
+        items=_picker_sequence_items,
+        update=_on_picker_sequence_update,
+    )
+    picker_shot: bpy.props.EnumProperty(
+        name="Shot",
+        description="Shot this file belongs to",
+        items=_picker_shot_items,
+    )
+    picker_task_type: bpy.props.EnumProperty(
         name="Task Type",
-        description=(
-            "Manually choose which task type this file's unmatched "
-            "task-type folder corresponds to"
-        ),
-        items=_task_type_override_items,
+        description="Task type this file belongs to",
+        items=_picker_task_type_items,
     )
     comment_items: bpy.props.CollectionProperty(type=KitsuCommentItem)
     comment_active_index: bpy.props.IntProperty(

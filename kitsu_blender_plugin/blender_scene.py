@@ -55,6 +55,24 @@ def save_task_type_override(task_type_id):
     bpy.context.scene.kitsu_task_type_override_id = task_type_id
 
 
+def load_shot_override():
+    """The manually-picked shot id remembered for the current scene, or
+    None — same storage and lifetime as load_task_type_override."""
+    return bpy.context.scene.kitsu_shot_override_id or None
+
+
+def save_shot_override(shot_id):
+    """Remember a manually-picked shot id on the current scene."""
+    bpy.context.scene.kitsu_shot_override_id = shot_id
+
+
+def clear_overrides():
+    """Forget both manual picks on the current scene, so detection goes
+    back to reading its folders."""
+    bpy.context.scene.kitsu_shot_override_id = ""
+    bpy.context.scene.kitsu_task_type_override_id = ""
+
+
 def scene_fps(scene=None):
     """Frames per second of the scene, matching Blender's own fps_base division."""
     scene = scene or bpy.context.scene

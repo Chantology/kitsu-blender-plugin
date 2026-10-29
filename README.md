@@ -206,6 +206,22 @@ login attempt with a specific message, not the whole add-on.
    | Shot (TV series, with episodes) | `.../<Episode>/<Sequence>/<Shot>/<TaskType>/file.blend` |
 
    Folder names are matched case-insensitively against Kitsu's own names.
+
+   If the folders don't resolve, the Task section shows a **task picker**
+   instead of just failing. This covers a shot whose folders don't map to
+   Kitsu, for example a TV-show project with no episode folder on disk. It
+   also covers a task-type folder that matches no task in Kitsu. The
+   picker has cascading **Episode → Sequence → Shot** dropdowns (the
+   episode row only appears for projects with episodes) and a **Task
+   Type** dropdown; **Use Selected** applies the choice. **Change Task...**
+   (next to Detect Task) opens the same picker at any time, so you can
+   switch to a different shot or task type by hand.
+
+   Manual picks are saved inside the `.blend` file itself. They take
+   precedence over folder detection on later Detect Task clicks, and the
+   breadcrumb is marked "(set manually)". **Reset to Folder Detection** in
+   the picker forgets them.
+
    Once detected, the project thumbnail/name, the task breadcrumb, status,
    and due date are shown, along with a **timesheet**: a slider (0–12h in
    half-hour steps), 1h/4h/8h presets, and **Log Time** (sets today's
@@ -221,12 +237,17 @@ login attempt with a specific message, not the whole add-on.
    revisions get **Add Timeline Markers** and **Show Drawovers in
    Viewport** instead), and its attachments (**Save Attachment(s)** to
    write them to disk).
-4. The **Publish** section captures the viewport at the current frame and
-   publishes it as a new Kitsu revision — pick a status, write a comment,
-   optionally queue extra images (**+ From Viewport** / **+ From
-   File...**) as additional previews on the same revision, then click
-   **Publish**. If the `.blend` filename ends in a `_v###`-style version,
-   that number becomes the Kitsu revision number too.
+4. In the **Publish** section, pick a status, write a comment, queue the
+   image(s) or video you want to show, and click **Publish**. Nothing is
+   captured automatically: queue items with **+ From Viewport** (the
+   viewport at the current frame) or **+ From File...** (an existing
+   image, or an **MP4/MOV video**, e.g. one rendered on the farm; a video
+   is always moved to the front of the queue). The first item becomes the
+   main preview of a new Kitsu revision and the rest are added as
+   variations on the same revision. With an empty queue, Publish posts
+   just the status change and comment. If the `.blend` filename ends in a
+   `_v###`-style version, that number becomes the Kitsu revision number
+   too.
 5. **Publish Capture** (a sub-panel under Publish) exports the full
    playback range as an H.264 `.mp4` and publishes it as a new revision —
    no external `ffmpeg` needed, Blender's own render pipeline handles it.

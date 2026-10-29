@@ -12,7 +12,7 @@ import os
 
 import bpy
 
-from . import state, thumbnails
+from . import properties, state, thumbnails
 from .preferences import get_preferences
 
 
@@ -124,7 +124,9 @@ class KITSU_PT_task(KITSU_PT_base, bpy.types.Panel):
             name_row.alignment = "CENTER"
             name_row.label(text=state.runtime.project.get("name", ""))
 
-        layout.operator("kitsu.detect_task", icon="FILE_REFRESH")
+        buttons = layout.row(align=True)
+        buttons.operator("kitsu.detect_task", icon="FILE_REFRESH")
+        buttons.operator("kitsu.change_task", icon="PREFERENCES", depress=state.runtime.task_picker_visible)
 
         # Shown here too (not just in Connection): a failed detection (e.g.
         # a folder structure that doesn't match Kitsu's expected layout)
@@ -132,31 +134,18 @@ class KITSU_PT_task(KITSU_PT_base, bpy.types.Panel):
         # in a different section they may not be looking at.
         _draw_status(layout)
 
-        mismatch = state.runtime.task_type_mismatch
-        if mismatch is not None:
-            # The asset/shot itself resolved fine -- only its task-type
-            # folder name didn't match anything in Kitsu (e.g. a
-            # "modeling_blender" folder used to separate Blender files on
-            # disk, still really a "Modeling" task). Offer a manual pick
-            # instead of just reporting failure; this only ever appears in
-            # that one specific case, so the normal picker-free layout
-            # below is unaffected otherwise.
-            layout.label(
-                text=f"Folder task type '{mismatch.task_type_name}' didn't "
-                "match any task type in this project — pick one:",
-                icon="QUESTION",
-            )
-            wm_props = context.window_manager.kitsu
-            layout.prop(wm_props, "task_type_override_choice", text="")
-            layout.operator("kitsu.apply_task_type_override", icon="CHECKMARK")
-            return
+        if state.runtime.task_picker_visible:
+            self._draw_task_picker(context, layout)
 
         task = state.runtime.task
         if task is None:
             layout.label(text="No task detected.")
             return
 
-        layout.label(text=" / ".join(state.runtime.task_breadcrumb))
+        breadcrumb = " / ".join(state.runtime.task_breadcrumb)
+        if state.runtime.task_manual:
+            breadcrumb += "  (set manually)"
+        layout.label(text=breadcrumb)
 
         status_name = _status_name_for_task(task)
         if status_name:
@@ -165,6 +154,43 @@ class KITSU_PT_task(KITSU_PT_base, bpy.types.Panel):
         layout.label(text=f"Due: {due_date or 'Not set'}")
 
         self._draw_timesheet(context, layout)
+
+    def _draw_task_picker(self, context, layout):
+        """Episode -> Sequence -> Shot -> Task Type dropdowns, shown when
+        detection can't resolve the task (e.g. a TV-show file with no
+        episode folder on disk, or a "modeling_blender" task-type folder
+        that's really a "Modeling" task) or via Change Task. The shot rows
+        only appear for shot-context files, the episode row only for
+        projects that have episodes."""
+        wm_props = context.window_manager.kitsu
+        box = layout.box()
+        box.label(text=state.runtime.task_picker_hint, icon="QUESTION")
+
+        is_shot = state.runtime.picker_context == "shot"
+        project_id = (state.runtime.project or {}).get("id")
+        tree = state.runtime.shot_tree if state.runtime.shot_tree_project_id == project_id else None
+        if is_shot and tree is None:
+            return  # still loading (see operators._open_task_picker)
+        if not state.runtime.task_type_options:
+            return  # still loading
+
+        col = box.column()
+        if is_shot:
+            if tree.episodic:
+                col.prop(wm_props, "picker_episode")
+            col.prop(wm_props, "picker_sequence")
+            col.prop(wm_props, "picker_shot")
+        task_type_row = col.row()
+        # Nothing to resolve a task type against until there's a shot.
+        task_type_row.enabled = state.runtime.picker_entity is not None or (
+            is_shot and wm_props.picker_shot not in ("", properties.PICKER_NONE)
+        )
+        task_type_row.prop(wm_props, "picker_task_type")
+
+        box.operator("kitsu.apply_task_pick", icon="CHECKMARK")
+        scene = context.scene
+        if scene.kitsu_shot_override_id or scene.kitsu_task_type_override_id:
+            box.operator("kitsu.reset_task_overrides", icon="LOOP_BACK")
 
     def _draw_timesheet(self, context, layout):
         wm_props = context.window_manager.kitsu

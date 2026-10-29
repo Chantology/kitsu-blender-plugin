@@ -46,14 +46,26 @@ def register():
     bpy.types.WindowManager.kitsu = bpy.props.PointerProperty(type=properties.KitsuSessionProperties)
     # Scene-scoped (not WindowManager, unlike the rest of this addon's UI
     # state): saved into the .blend file itself, so a manual task-type
-    # override survives a Blender restart. See blender_scene.py's
+    # override survives a Blender restart and wins over folder detection
+    # until Reset to Folder Detection. See blender_scene.py's
     # load_task_type_override/save_task_type_override.
     bpy.types.Scene.kitsu_task_type_override_id = bpy.props.StringProperty(
         name="Kitsu Task Type Override",
         description=(
             "Manually-selected task type id for this file, remembered here "
             "when the folder structure's task-type name doesn't match any "
-            "task type in Kitsu"
+            "task type in Kitsu, or picked via Change Task"
+        ),
+        default="",
+    )
+    # Same persistence model, for a shot picked by hand in the task picker
+    # (e.g. a TV-show file with no episode folder on disk). See
+    # load_shot_override/save_shot_override.
+    bpy.types.Scene.kitsu_shot_override_id = bpy.props.StringProperty(
+        name="Kitsu Shot Override",
+        description=(
+            "Manually-selected shot id for this file, remembered here when "
+            "its folders don't map onto a Kitsu shot, or picked via Change Task"
         ),
         default="",
     )
@@ -70,6 +82,7 @@ def unregister():
     if bpy.app.timers.is_registered(operators.try_auto_login):
         bpy.app.timers.unregister(operators.try_auto_login)
 
+    del bpy.types.Scene.kitsu_shot_override_id
     del bpy.types.Scene.kitsu_task_type_override_id
     del bpy.types.WindowManager.kitsu
 
